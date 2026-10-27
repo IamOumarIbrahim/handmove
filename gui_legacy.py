@@ -1,5 +1,5 @@
 """
-Legacy Tkinter Graphical Interface for uHand UNO / COM3 Robotic Hand Controller.
+Legacy Tkinter Graphical Interface for uHand UNO serial control.
 Provides maximum interactive control, real-time 2D animated hand visualization,
 fine servo calibration, preset gestures, sequence recording, peripherals,
 and raw bidirectional packet sniffing/injection.
@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Tuple, Union
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from controller import HandController, ProtocolType
+from connection_settings import list_ble_devices, list_serial_ports, load_connection_settings
 import gestures
 
 
@@ -35,13 +36,15 @@ class LegacyHandGUI:
     BONE_COLOR = "#61AFEF"
     JOINT_COLOR = "#E5C07B"
     PALM_COLOR = "#2C3E50"
+    DEFAULT_MARK_COLOR = "#C00000"
 
-    def __init__(self, root: tk.Tk, default_port: str = "COM3", default_baud: int = 9600):
+    def __init__(self, root: tk.Tk, default_port: str = "", default_baud: int = 9600):
         self.root = root
-        self.root.title("uHand UNO Controller - Maximum Control Console [COM3]")
+        self.root.title("uHand UNO Controller - Maximum Control Console")
         self.root.geometry("1280x850")
         self.root.minsize(1100, 750)
         self.root.configure(bg=self.BG_COLOR)
+        self.root.protocol("WM_DELETE_WINDOW", self._close_application)
 
         # Core controller
         self.ctrl = HandController(
@@ -79,7 +82,7 @@ class LegacyHandGUI:
         # Initial canvas render
         self.root.after(100, self._render_hand_canvas)
 
-        # Attempt auto-connect to COM3 after UI shows
+        # Attempt auto-connect to a previously verified adapter port after UI shows
         self.root.after(300, self._auto_connect)
 
     # =========================================================================
@@ -93,6 +96,7 @@ class LegacyHandGUI:
             style.theme_use("winnative" if os.name == "nt" else "classic")
         except Exception:
             pass
+        style.configure("MarkedDefault.TCombobox", foreground=self.DEFAULT_MARK_COLOR)
 
     def _build_menu(self) -> None:
         """Top menu bar."""
@@ -105,11 +109,11 @@ class LegacyHandGUI:
         file_menu.add_command(label="Save Sequence...", command=self._save_sequence)
         file_menu.add_command(label="Load Sequence...", command=self._load_sequence)
         file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.root.destroy)
+        file_menu.add_command(label="Exit", command=self._close_application)
         menubar.add_cascade(label="File", menu=file_menu)
 
         tools_menu = tk.Menu(menubar, tearoff=0)
-        tools_menu.add_command(label="All Servos Neutral (90°)", command=lambda: self._apply_pose([90]*6))
+        tools_menu.add_command(label="All Servos Neutral (90°)", command=lambda: self._apply_pose([90]*6, force=True))
         tools_menu.add_command(label="All Servos Open (180°)", command=lambda: self._apply_pose([180, 180, 180, 180, 180, 90]))
         tools_menu.add_command(label="All Servos Closed (0°)", command=lambda: self._apply_pose([0, 0, 0, 0, 0, 90]))
         tools_menu.add_separator()
@@ -139,24 +143,52 @@ class LegacyHandGUI:
         self.conn_lamp.pack(side=tk.LEFT, padx=6)
         self._draw_lamp("red")
 
-        # Port selection
-        tk.Label(bar, text="Port:", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR).pack(side=tk.LEFT, padx=(4, 2))
+        # The Hiwonder Bluetooth UART is the default PC control path.
+        tk.Label(bar, text="Transport (RED default):", font=("Tahoma", 9, "bold"), fg=self.DEFAULT_MARK_COLOR, bg=self.BG_COLOR).pack(side=tk.LEFT, padx=(4, 2))
+        self.transport_var = tk.StringVar(value="Bluetooth LE" if self.ctrl.transport == "ble" else "Serial UART")
+        self.transport_combo = ttk.Combobox(bar, textvariable=self.transport_var, width=14, state="readonly", values=["Bluetooth LE", "Serial UART"], style="MarkedDefault.TCombobox")
+        self.transport_combo.pack(side=tk.LEFT, padx=2)
+        self.transport_combo.bind("<<ComboboxSelected>>", self._on_transport_changed)
+
+        self.ble_label = tk.Label(bar, text="BLE device:", font=("Tahoma", 9, "bold"), fg=self.DEFAULT_MARK_COLOR, bg=self.BG_COLOR)
+        self.ble_label.pack(side=tk.LEFT, padx=(6, 2))
+        self.ble_target_var = tk.StringVar(value=self._format_ble_target(self.ctrl.ble_name, self.ctrl.ble_address))
+        self.ble_target_combo = ttk.Combobox(bar, textvariable=self.ble_target_var, width=22, values=[self.ble_target_var.get()], style="MarkedDefault.TCombobox")
+        self.ble_target_combo.pack(side=tk.LEFT, padx=2)
+        self.btn_refresh_ble = tk.Button(bar, text="Find", font=("Tahoma", 8), bg="#D4D0C8", relief=tk.RAISED, bd=2, command=self._refresh_ble_devices)
+        self.btn_refresh_ble.pack(side=tk.LEFT, padx=2)
+
+        # Serial UART remains available as a secondary transport.
+        self.port_label = tk.Label(bar, text="COM port:", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR)
+        self.port_label.pack(side=tk.LEFT, padx=(8, 2))
         self.port_var = tk.StringVar(value=self.ctrl.port)
-        self.port_combo = ttk.Combobox(bar, textvariable=self.port_var, width=8, values=["COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "/dev/ttyUSB0"])
+        port_values = [port["device"] for port in list_serial_ports()]
+        self.port_combo = ttk.Combobox(
+            bar, textvariable=self.port_var, width=10,
+            values=port_values, style="MarkedDefault.TCombobox"
+        )
         self.port_combo.pack(side=tk.LEFT, padx=2)
+        self.btn_refresh_serial = tk.Button(
+            bar, text="Refresh", font=("Tahoma", 8), bg="#D4D0C8",
+            relief=tk.RAISED, bd=2, command=self._refresh_serial_ports
+        )
+        self.btn_refresh_serial.pack(side=tk.LEFT, padx=2)
 
         # Baud selection
-        tk.Label(bar, text="Baud:", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR).pack(side=tk.LEFT, padx=(8, 2))
+        self.baud_label = tk.Label(bar, text="Baud:", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR)
+        self.baud_label.pack(side=tk.LEFT, padx=(8, 2))
         self.baud_var = tk.StringVar(value=str(self.ctrl.baudrate))
-        self.baud_combo = ttk.Combobox(bar, textvariable=self.baud_var, width=8, values=["9600", "115200", "57600", "19200", "38400"])
+        self.baud_combo = ttk.Combobox(bar, textvariable=self.baud_var, width=8, values=["9600", "115200", "57600", "19200", "38400"], style="MarkedDefault.TCombobox")
         self.baud_combo.pack(side=tk.LEFT, padx=2)
 
         # Protocol selection
-        tk.Label(bar, text="Protocol:", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR).pack(side=tk.LEFT, padx=(8, 2))
+        self.protocol_label = tk.Label(bar, text="Protocol:", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR)
+        self.protocol_label.pack(side=tk.LEFT, padx=(8, 2))
         self.proto_var = tk.StringVar(value=self.ctrl.protocol.value)
-        self.proto_combo = ttk.Combobox(bar, textvariable=self.proto_var, width=28, values=[p.value for p in ProtocolType])
+        self.proto_combo = ttk.Combobox(bar, textvariable=self.proto_var, width=28, values=[p.value for p in ProtocolType], style="MarkedDefault.TCombobox")
         self.proto_combo.pack(side=tk.LEFT, padx=2)
         self.proto_combo.bind("<<ComboboxSelected>>", self._on_protocol_changed)
+        self._on_transport_changed()
 
         # Simulation mode checkbox
         self.sim_var = tk.BooleanVar(value=self.ctrl.simulation_mode)
@@ -181,7 +213,7 @@ class LegacyHandGUI:
 
         # Query Angles Button
         self.btn_query = tk.Button(
-            bar, text="Read Angles (0x11)", font=("Tahoma", 9), bg="#D4D0C8",
+            bar, text="Read Angles", font=("Tahoma", 9), bg="#D4D0C8",
             relief=tk.RAISED, bd=2, padx=6, command=self.ctrl.query_angles
         )
         self.btn_query.pack(side=tk.LEFT, padx=6)
@@ -192,6 +224,39 @@ class LegacyHandGUI:
             relief=tk.RAISED, bd=2, padx=8, command=self._on_estop_clicked
         )
         self.btn_estop.pack(side=tk.RIGHT, padx=6)
+        self._on_transport_changed()
+
+        tk.Label(
+            self.root,
+            text="RED = Hiwonder BLE UART defaults. Servo commands use the same A-F angle format as Wonderbot; no hand-side wiring is needed.",
+            font=("Tahoma", 8, "bold"), fg=self.DEFAULT_MARK_COLOR, bg=self.BG_COLOR, anchor=tk.W
+        ).pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 2))
+
+    def _refresh_serial_ports(self) -> None:
+        """Refresh the port selector from ports currently present on this computer."""
+        ports = list_serial_ports()
+        values = [port["device"] for port in ports]
+        self.port_combo.configure(values=values)
+        self.ctrl.log("SYS", "Available serial ports: " + (", ".join(values) if values else "none found"))
+
+    @staticmethod
+    def _format_ble_target(name: str, address: str) -> str:
+        return f"{name or 'Hiwonder'} — {address}" if address else (name or "Hiwonder")
+
+    @staticmethod
+    def _parse_ble_target(value: str) -> Tuple[str, str]:
+        if " — " in value:
+            name, address = value.rsplit(" — ", 1)
+            return name.strip(), address.strip()
+        return value.strip() or "Hiwonder", ""
+
+    def _refresh_ble_devices(self) -> None:
+        self.status_bar.config(text="Searching for nearby Bluetooth LE devices…")
+        devices = list_ble_devices(timeout=4.0)
+        values = [self._format_ble_target(item["name"], item["address"]) for item in devices]
+        self.ble_target_combo.configure(values=values or [self.ble_target_var.get()])
+        self.ctrl.log("SYS", "Nearby BLE devices: " + (", ".join(values) if values else "none found"))
+        self.status_bar.config(text=f"Bluetooth scan complete: {len(values)} device(s) found")
 
     def _draw_lamp(self, color: str) -> None:
         """Update connection indicator circle."""
@@ -328,7 +393,7 @@ class LegacyHandGUI:
 
         tk.Button(
             m_row, text="Neutral (90°)", font=("Tahoma", 8, "bold"), bg="#D4D0C8",
-            relief=tk.RAISED, bd=2, command=lambda: self._apply_pose([90]*6)
+            relief=tk.RAISED, bd=2, command=lambda: self._apply_pose([90]*6, force=True)
         ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
         tk.Button(
@@ -803,16 +868,17 @@ class LegacyHandGUI:
         inj_bar = tk.Frame(panel, bg=self.BG_COLOR)
         inj_bar.pack(fill=tk.X, padx=4, pady=3)
 
-        tk.Label(inj_bar, text="Send Hex Packet:", font=("Tahoma", 8, "bold"), bg=self.BG_COLOR).pack(side=tk.LEFT, padx=2)
+        tk.Label(inj_bar, text="Raw UART packet (serial only):", font=("Tahoma", 8, "bold"), bg=self.BG_COLOR).pack(side=tk.LEFT, padx=2)
         self.hex_input_var = tk.StringVar(value="AA 77 01 06 5A 5A 5A 5A 5A 5A DC")
         self.hex_entry = tk.Entry(inj_bar, textvariable=self.hex_input_var, font=("Courier New", 9), width=42)
         self.hex_entry.pack(side=tk.LEFT, padx=2)
         self.hex_entry.bind("<Return>", lambda e: self._on_send_hex_clicked())
 
-        tk.Button(
+        self.hex_send_button = tk.Button(
             inj_bar, text="Send Hex", font=("Tahoma", 8, "bold"), bg="#D4D0C8",
             relief=tk.RAISED, bd=2, command=self._on_send_hex_clicked
-        ).pack(side=tk.LEFT, padx=2)
+        )
+        self.hex_send_button.pack(side=tk.LEFT, padx=2)
 
         tk.Button(
             inj_bar, text="Clear Log", font=("Tahoma", 8), bg="#D4D0C8",
@@ -827,7 +893,7 @@ class LegacyHandGUI:
     def _build_status_bar(self) -> None:
         """Footer status bar."""
         self.status_bar = tk.Label(
-            self.root, text="Ready | Target Port: COM3 @ 9600 baud",
+            self.root, text="Ready | Hiwonder Bluetooth LE is the red default connection",
             bd=1, relief=tk.SUNKEN, anchor=tk.W, font=("Tahoma", 8), bg="#D4D0C8"
         )
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
@@ -837,35 +903,89 @@ class LegacyHandGUI:
     # =========================================================================
 
     def _auto_connect(self) -> None:
-        """Attempt immediate connection to COM3 on startup."""
+        """Auto-connect to the saved Hiwonder BLE module, which is the default transport."""
+        if self.transport_var.get() == "Bluetooth LE":
+            self._on_connect_clicked(show_error=False)
+            return
         self.ctrl.port = self.port_var.get()
         try:
             self.ctrl.baudrate = int(self.baud_var.get())
         except ValueError:
             self.ctrl.baudrate = 9600
 
-        success, msg = self.ctrl.connect()
-        if not success:
-            # Fallback to simulation mode smoothly
-            self.ctrl.simulation_mode = True
-            self.sim_var.set(True)
-            self.ctrl.connect()
+        if not self.ctrl.port:
+            self.status_bar.config(text="DISCONNECTED: Select the uHand UART COM port")
+            return
+        self._connect_in_background(show_error=False)
 
-    def _on_connect_clicked(self) -> None:
-        """Manual connection trigger."""
-        self.ctrl.port = self.port_var.get()
-        try:
-            self.ctrl.baudrate = int(self.baud_var.get())
-        except ValueError:
-            self.ctrl.baudrate = 9600
+    def _on_transport_changed(self, event=None) -> None:
+        """Show BLE device settings by default, or serial options when selected."""
+        is_ble = self.transport_var.get() == "Bluetooth LE"
+        next_transport = "ble" if is_ble else "serial"
+        if self.ctrl.transport != next_transport and self.ctrl.is_connected():
+            self.ctrl.disconnect()
+        ble_widgets = (self.ble_label, self.ble_target_combo, self.btn_refresh_ble)
+        serial_widgets = (
+            self.port_label, self.port_combo, self.btn_refresh_serial,
+            self.baud_label, self.baud_combo, self.protocol_label, self.proto_combo,
+        )
+        for widget in ble_widgets:
+            if is_ble and not widget.winfo_manager():
+                widget.pack(side=tk.LEFT, padx=2)
+            elif not is_ble and widget.winfo_manager():
+                widget.pack_forget()
+        for widget in serial_widgets:
+            if not is_ble and not widget.winfo_manager():
+                widget.pack(side=tk.LEFT, padx=2)
+            elif is_ble and widget.winfo_manager():
+                widget.pack_forget()
+        self.ctrl.transport = next_transport
+        self.ctrl.log("SYS", f"Selected {'Hiwonder BLE app protocol' if is_ble else 'serial UART'} transport")
+        if hasattr(self, "btn_query"):
+            self.btn_query.config(
+                state=tk.DISABLED if is_ble else tk.NORMAL,
+                text="Angle feedback unavailable" if is_ble else "Read Angles (serial)",
+            )
+        if hasattr(self, "hex_send_button"):
+            self.hex_entry.config(state=tk.DISABLED if is_ble else tk.NORMAL)
+            self.hex_send_button.config(state=tk.DISABLED if is_ble else tk.NORMAL)
 
+    def _on_connect_clicked(self, show_error: bool = True) -> None:
+        """Start a hardware connection without blocking Tk while BLE scans."""
+        self.ctrl.transport = "ble" if self.transport_var.get() == "Bluetooth LE" else "serial"
+        if self.ctrl.transport == "ble":
+            self.ctrl.ble_name, self.ctrl.ble_address = self._parse_ble_target(self.ble_target_var.get())
+        else:
+            self.ctrl.port = self.port_var.get()
+            try:
+                self.ctrl.baudrate = int(self.baud_var.get())
+            except ValueError:
+                self.ctrl.baudrate = 9600
+            for p in ProtocolType:
+                if p.value == self.proto_var.get():
+                    self.ctrl.protocol = p
+                    break
         self.ctrl.simulation_mode = self.sim_var.get()
-        success, msg = self.ctrl.connect()
-        if not success:
-            messagebox.showwarning("Connection Warning", f"{msg}\n\nSwitching to Simulation Mode.")
-            self.ctrl.simulation_mode = True
-            self.sim_var.set(True)
-            self.ctrl.connect()
+        self._connect_in_background(show_error=show_error)
+
+    def _connect_in_background(self, show_error: bool) -> None:
+        self.btn_connect.config(state=tk.DISABLED)
+        self.transport_combo.config(state=tk.DISABLED)
+        self.ble_target_combo.config(state=tk.DISABLED)
+        self.port_combo.config(state=tk.DISABLED)
+        self.btn_refresh_ble.config(state=tk.DISABLED)
+        self.btn_refresh_serial.config(state=tk.DISABLED)
+        target = self.ctrl.ble_name if self.ctrl.transport == "ble" else self.ctrl.port
+        self.status_bar.config(text=f"Connecting to {target or 'uHand'}…")
+
+        def worker() -> None:
+            success, msg = self.ctrl.connect()
+            if not success:
+                self.root.after(0, lambda: self.btn_connect.config(state=tk.NORMAL))
+                if show_error:
+                    self.root.after(0, lambda: messagebox.showwarning("Connection Failed", msg))
+
+        threading.Thread(target=worker, name="uHand-connect", daemon=True).start()
 
     def _on_disconnect_clicked(self) -> None:
         """Disconnect trigger."""
@@ -873,10 +993,11 @@ class LegacyHandGUI:
 
     def _on_sim_toggled(self) -> None:
         """Toggle simulation mode."""
+        was_connected = self.ctrl.is_connected()
         self.ctrl.simulation_mode = self.sim_var.get()
-        if self.ctrl.is_connected():
+        if was_connected or self.ctrl.is_connected():
             self.ctrl.disconnect()
-            self.ctrl.connect()
+            self._connect_in_background(show_error=False)
 
     def _on_protocol_changed(self, event=None) -> None:
         """Switch communication protocol."""
@@ -884,13 +1005,13 @@ class LegacyHandGUI:
         for p in ProtocolType:
             if p.value == val:
                 self.ctrl.protocol = p
-                self.ctrl.log("SYS", f"Switched protocol to {p.value}")
+                self.ctrl.log("SYS", f"Switched serial protocol to {p.value}")
                 break
 
     def _on_estop_clicked(self) -> None:
         """Emergency neutral stop."""
         self.ctrl.stop_sequence()
-        self._apply_pose([90]*6)
+        self._apply_pose([90]*6, force=True)
         self.ctrl.set_rgb(255, 0, 0)
         self.ctrl.set_buzzer(2000, 300)
 
@@ -905,6 +1026,8 @@ class LegacyHandGUI:
                 target=lambda: self.ctrl.move_smooth(angles, duration_ms=self.smooth_dur_var.get()),
                 daemon=True
             ).start()
+        elif self.ctrl.transport == "ble" and not self.ctrl.simulation_mode:
+            self.ctrl.set_servo_angle(ch, angle)
         else:
             self.ctrl.send_angles(angles)
         self._render_hand_canvas()
@@ -928,29 +1051,29 @@ class LegacyHandGUI:
         """Toggle inversion on a channel."""
         self.ctrl.inverted[ch] = self.invert_vars[ch].get()
         # Resend current angle to update hardware
-        self.ctrl.send_angles(self.ctrl.current_angles)
+        self.ctrl.send_angles(self.ctrl.current_angles, force=True)
 
     def _on_trim_changed(self, ch: int) -> None:
         """Adjust trim on a channel."""
         self.ctrl.trims[ch] = self.trim_vars[ch].get()
-        self.ctrl.send_angles(self.ctrl.current_angles)
+        self.ctrl.send_angles(self.ctrl.current_angles, force=True)
 
     def _on_limit_changed(self, ch: int) -> None:
         """Update hardware angle limits."""
         self.ctrl.min_limits[ch] = self.cal_min_vars[ch].get()
         self.ctrl.max_limits[ch] = self.cal_max_vars[ch].get()
 
-    def _apply_pose(self, angles: List[int]) -> None:
+    def _apply_pose(self, angles: List[int], force: bool = False) -> None:
         """Apply a 6-angle pose to controls, canvas, and hardware."""
         for i, a in enumerate(angles):
             self.channel_vars[i].set(a)
-        if self.smooth_move_var.get():
+        if self.smooth_move_var.get() and not force:
             threading.Thread(
                 target=lambda: self.ctrl.move_smooth(angles, duration_ms=self.smooth_dur_var.get()),
                 daemon=True
             ).start()
         else:
-            self.ctrl.send_angles(angles)
+            self.ctrl.send_angles(angles, force=force)
         self._render_hand_canvas()
 
     def _apply_rgb(self, r: int, g: int, b: int) -> None:
@@ -1098,17 +1221,33 @@ class LegacyHandGUI:
         """Update connection lamps and status buttons."""
         def _update():
             if connected:
+                if self.ctrl.transport == "ble":
+                    self.ble_target_var.set(self._format_ble_target(self.ctrl.ble_name, self.ctrl.ble_address))
+                    self.ble_target_combo.configure(values=[self.ble_target_var.get()])
                 color = "#FF9900" if self.ctrl.simulation_mode else "#00FF00"
                 self._draw_lamp(color)
                 self.btn_connect.config(state=tk.DISABLED)
                 self.btn_disconnect.config(state=tk.NORMAL)
-                self.status_bar.config(text=f"CONNECTED: {message}")
+                prefix = "SIMULATION" if self.ctrl.simulation_mode else "CONNECTED"
+                self.status_bar.config(text=f"{prefix}: {message}")
             else:
                 self._draw_lamp("red")
                 self.btn_connect.config(state=tk.NORMAL)
                 self.btn_disconnect.config(state=tk.DISABLED)
                 self.status_bar.config(text=f"DISCONNECTED: {message}")
+            self.transport_combo.config(state="readonly")
+            self.ble_target_combo.config(state=tk.NORMAL)
+            self.port_combo.config(state=tk.NORMAL)
+            self.btn_refresh_ble.config(state=tk.NORMAL)
+            self.btn_refresh_serial.config(state=tk.NORMAL)
         self.root.after(0, _update)
+
+    def _close_application(self) -> None:
+        """Release BLE/serial resources before closing the window."""
+        try:
+            self.ctrl.disconnect()
+        finally:
+            self.root.destroy()
 
     def _on_sequence_step(self, step: int, total: int) -> None:
         """Update status bar with active sequence step."""
@@ -1121,13 +1260,15 @@ class LegacyHandGUI:
     # =========================================================================
 
     def _show_pinout_help(self) -> None:
-        """Display hardware wiring dialog."""
+        """Display connection guidance for BLE and the optional serial UART."""
         msg = (
             "Hiwonder uHand UNO / 6CH Knob Shield Wiring:\n\n"
             "• Microcontroller: Arduino UNO R3 (ATmega328P)\n"
             "• Shield: UNO 6CH Knob Shield V1.1\n"
-            "• Target Port: COM3 (or selected COM port)\n"
-            "• Default Baud Rate: 9600 bps (8 data bits, no parity, 1 stop bit)\n\n"
+            "• Default PC connection: built-in Hiwonder Bluetooth LE module; no extra wiring\n"
+            "• BLE commands match Wonderbot: A-F + angle + $\n"
+            "• Optional wired UART: USB-to-TTL RXD -> IO12, TXD -> IO10, GND -> GND\n"
+            "• Optional serial defaults: 9600 baud, 8 data bits, no parity, 1 stop bit\n\n"
             "Servo Channels:\n"
             "  S1 = Thumb  (PWM Pin 11)\n"
             "  S2 = Index  (PWM Pin 10)\n"
@@ -1145,7 +1286,10 @@ class LegacyHandGUI:
     def _show_protocol_help(self) -> None:
         """Display protocol documentation dialog."""
         msg = (
-            "uHand UNO Serial Protocol (0xAA 0x77):\n\n"
+            "Default Bluetooth LE app protocol (Wonderbot compatible):\n"
+            "  A<angle>$ = Thumb; B = Index; C = Middle; D = Ring; E = Pinky; F = Wrist\n"
+            "  Angle range: 0-180 degrees. Each command ends with '$'.\n\n"
+            "Optional wired serial protocol (0xAA 0x77):\n\n"
             "Frame Structure:\n"
             "  [Header (2B)] [Func (1B)] [Len (1B)] [Data (NB)] [Checksum (1B)]\n"
             "  Header: 0xAA 0x77\n"
@@ -1173,10 +1317,19 @@ class LegacyHandGUI:
         messagebox.showinfo("About uHand UNO Controller", msg)
 
 
-def launch_gui(port: str = "COM3", baud: int = 9600) -> None:
+def launch_gui(port: Optional[str] = None, baud: Optional[int] = None, transport: Optional[str] = None) -> None:
     """Entry point to launch the Tkinter GUI."""
     root = tk.Tk()
-    app = LegacyHandGUI(root, default_port=port, default_baud=baud)
+    defaults = load_connection_settings()
+    app = LegacyHandGUI(
+        root,
+        default_port=defaults["port"] if port is None else port,
+        default_baud=defaults["baudrate"] if baud is None else baud,
+    )
+    if transport in ("ble", "serial"):
+        app.ctrl.transport = transport
+        app.transport_var.set("Bluetooth LE" if transport == "ble" else "Serial UART")
+        app._on_transport_changed()
     root.mainloop()
 
 

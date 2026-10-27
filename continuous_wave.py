@@ -1,49 +1,27 @@
-"""
-Continuous Live Wave & Motion Transmitter for uHand UNO / COM3.
-Runs an indefinite oscillating wave sequence with dtr=False so that as soon as
-the physical hardware prerequisites (Bluetooth conflict, power switch) are aligned,
-the robotic hand immediately begins moving in real time.
-"""
+"""Continuous motion demo using the saved Hiwonder BLE or serial connection."""
 
-import os
-import sys
 import time
-import serial
+from typing import Optional
 
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from controller import HandController
+from connection_settings import load_connection_settings
 
 
-def make_uhand_packet(func: int, data: list) -> bytes:
-    """Build native uHand UNO packet: AA 77 <func> <len> <data...> <chk>."""
-    length = len(data)
-    total = (func + length + sum(data)) & 0xFF
-    chk = (0xFF - total) & 0xFF
-    return bytes([0xAA, 0x77, func, length]) + bytes(data) + bytes([chk])
+def run_continuous_wave(port: Optional[str] = None, baud: Optional[int] = None):
+    defaults = load_connection_settings()
+    port = defaults["port"] if port is None else port
+    baud = defaults["baudrate"] if baud is None else baud
 
-
-def run_continuous_wave(port: str = "COM3", baud: int = 9600):
     print("=" * 76)
     print("  uHand UNO Continuous Wave & Gesture Loop")
-    print(f"  Target: {port} @ {baud} baud | DTR=False (Arduino will not reset)")
+    print(f"  Target: {defaults['ble_name']} BLE" if defaults["transport"] == "ble" else f"  Target: {port or 'select COM port'} @ {baud} baud")
     print("=" * 76)
 
-    ser = serial.Serial()
-    ser.port = port
-    ser.baudrate = baud
-    ser.bytesize = serial.EIGHTBITS
-    ser.parity = serial.PARITY_NONE
-    ser.stopbits = serial.STOPBITS_ONE
-    ser.timeout = 0.1
-    ser.write_timeout = 1.0
-    ser.dtr = False
-    ser.rts = False
-
-    try:
-        ser.open()
-        print(f"[CONNECTED] Opened {port} successfully with DTR=False.")
-    except Exception as e:
-        print(f"[ERROR] Could not open {port}: {e}")
+    controller = HandController(port=port, baudrate=baud)
+    controller.on_log = lambda direction, text: print(f"[{direction}] {text}") if direction in ("TX", "ERR") else None
+    success, message = controller.connect()
+    if not success:
+        print(f"[DISCONNECTED] {message}")
         return
 
     # Motion keyframes: Open -> Fist -> Peace -> Wave Left -> Wave Right -> Open
@@ -65,24 +43,16 @@ def run_continuous_wave(port: str = "COM3", baud: int = 9600):
             name, angles = poses[step % len(poses)]
             step += 1
 
-            # Build and transmit packet
-            pkt = make_uhand_packet(0x01, angles)
-            ser.write(pkt)
-            ser.flush()
-
-            # Read any feedback
-            rx = ser.read(ser.in_waiting) if ser.in_waiting > 0 else b""
-            rx_str = f" | RX: {rx.hex(' ').upper()}" if rx else ""
-
-            print(f"[{step:04d}] TX >> {pkt.hex(' ').upper()} ({name}){rx_str}", flush=True)
+            controller.send_angles(angles)
+            print(f"[{step:04d}] {name}: {angles}", flush=True)
             time.sleep(0.6)
 
     except KeyboardInterrupt:
         print("\n[STOPPED] Continuous wave loop stopped by user.")
     finally:
-        ser.close()
-        print("[CLOSED] Port closed.")
+        controller.disconnect()
+        print("[CLOSED] Connection closed.")
 
 
 if __name__ == "__main__":
-    run_continuous_wave(port="COM3", baud=9600)
+    run_continuous_wave()

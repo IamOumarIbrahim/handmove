@@ -1,0 +1,20 @@
+{
+  "connection": {
+    "transport": "ble",
+    "ble_name": "Hiwonder",
+    "ble_address": "48:87:2D:82:90:58",
+    "ble_service_uuid": "0000fff0-0000-1000-8000-00805f9b34fb",
+    "ble_characteristic_uuid": "0000ffe1-0000-1000-8000-00805f9b34fb",
+    "port": "",
+    "baudrate": 9600,
+    "protocol": "Hiwonder BLE app protocol (ASCII A-F angle $)",
+    "bytesize": 8,
+    "parity": "N",
+    "stopbits": 1,
+    "dtr": false,
+    "rts": false,
+    "verified": true
+  },
+  "mark_color": "red",
+  "source": "Saved after the Hiwonder BLE GATT UART connected; servo movement uses the documented A-F angle commands."
+}

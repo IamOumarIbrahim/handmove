@@ -1,7 +1,7 @@
 """
 Unified Launcher for uHand UNO Robotic Hand Controller Suite.
 Supports launching either the legacy Tkinter Graphical Interface or the
-Menu-Based Interactive Terminal. Default target port is COM3.
+Menu-Based Interactive Terminal. Hiwonder BLE is the default connection transport.
 """
 
 import argparse
@@ -11,16 +11,18 @@ import sys
 # Ensure HANDMOVE directory is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
+from connection_settings import load_connection_settings
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="uHand UNO Robotic Hand Controller Suite (COM3)",
+        description="uHand UNO Robotic Hand Controller Suite",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py --gui               Launch legacy Tkinter GUI (Default: COM3)
+  python main.py --gui               Launch GUI (saved Hiwonder BLE device is the default)
   python main.py --cli               Launch menu-based terminal interface
-  python main.py --gui --port COM3   Specify COM3 explicitly
+  python main.py --gui --transport serial --port COM5   Use a serial UART adapter
   python main.py --cli --sim         Run terminal menu in offline simulation mode
         """
     )
@@ -28,27 +30,41 @@ Examples:
     group.add_argument("-g", "--gui", action="store_true", help="Launch Legacy Tkinter Graphical Interface")
     group.add_argument("-c", "--cli", "--terminal", action="store_true", help="Launch Menu-Based Terminal")
 
-    parser.add_argument("-p", "--port", type=str, default="COM3", help="Serial COM Port (default: COM3)")
-    parser.add_argument("-b", "--baud", type=int, default=9600, help="Baud rate (default: 9600)")
+    defaults = load_connection_settings()
+    parser.add_argument(
+        "-p", "--port", type=str, default=defaults["port"] or None,
+        help="Serial COM port (used when --transport serial)"
+    )
+    parser.add_argument(
+        "--transport", choices=["ble", "serial"], default=defaults["transport"],
+        help="Connection transport (default: saved setting; normally BLE)"
+    )
+    parser.add_argument(
+        "-b", "--baud", type=int, default=defaults["baudrate"],
+        help="Baud rate (documented uHand UNO default: 9600)"
+    )
     parser.add_argument("-s", "--sim", "--simulation", action="store_true", help="Force offline simulation mode")
 
     args = parser.parse_args()
+    selected_port = args.port or ""
 
     # Determine mode
     if args.cli:
         from terminal_menu import TerminalMenuApp
-        print(f"Starting uHand UNO Terminal Menu on {args.port} (Baud: {args.baud})...")
-        app = TerminalMenuApp(port=args.port, baudrate=args.baud, simulation=args.sim)
+        target = f"{selected_port or 'select COM port'} at {args.baud} baud" if args.transport == "serial" else "Hiwonder BLE"
+        print(f"Starting uHand UNO Terminal Menu via {target}...")
+        app = TerminalMenuApp(port=selected_port, baudrate=args.baud, simulation=args.sim, transport=args.transport)
         app.run()
     elif args.gui:
         import gui_legacy
-        print(f"Launching Legacy Tkinter Graphical Interface on {args.port}...")
-        gui_legacy.launch_gui(port=args.port, baud=args.baud)
+        target = f"{selected_port or 'select COM port'} at {args.baud} baud" if args.transport == "serial" else "Hiwonder BLE"
+        print(f"Launching Legacy Tkinter Graphical Interface via {target}...")
+        gui_legacy.launch_gui(port=selected_port, baud=args.baud, transport=args.transport)
     else:
         # If neither flag specified, present quick console selection
         print("=" * 64)
         print("   uHand UNO Robotic Hand Controller Suite [Reverse-Engineer]")
-        print(f"   Target Port: {args.port} | Baud Rate: {args.baud}")
+        print(f"   Target: {'Serial ' + (selected_port or 'COM port') if args.transport == 'serial' else 'Hiwonder Bluetooth LE'} | Baud Rate: {args.baud}")
         print("=" * 64)
         print("  [1] Launch Legacy Tkinter Graphical Interface (Recommended)")
         print("  [2] Launch Menu-Based Interactive Terminal")
@@ -63,13 +79,13 @@ Examples:
 
         if choice in ("2", "cli", "c"):
             from terminal_menu import TerminalMenuApp
-            app = TerminalMenuApp(port=args.port, baudrate=args.baud, simulation=args.sim)
+            app = TerminalMenuApp(port=selected_port, baudrate=args.baud, simulation=args.sim, transport=args.transport)
             app.run()
         elif choice in ("0", "q", "exit"):
             print("Exiting.")
         else:
             import gui_legacy
-            gui_legacy.launch_gui(port=args.port, baud=args.baud)
+            gui_legacy.launch_gui(port=selected_port, baud=args.baud, transport=args.transport)
 
 
 if __name__ == "__main__":

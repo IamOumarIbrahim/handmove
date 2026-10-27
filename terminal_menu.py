@@ -1,6 +1,6 @@
 """
 Menu-based terminal interface for uHand UNO robot hand control.
-Provides maximum interactive control over COM3 with full diagnostics,
+Provides maximum interactive control over the uHand UNO UART with full diagnostics,
 presets, calibration, sequence recording, and peripheral testing.
 """
 
@@ -13,6 +13,7 @@ from typing import List, Optional
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from controller import HandController, ProtocolType
+from connection_settings import load_connection_settings
 import gestures
 
 
@@ -36,12 +37,16 @@ def clear_screen() -> None:
 
 
 class TerminalMenuApp:
-    def __init__(self, port: str = "COM3", baudrate: int = 9600, simulation: bool = False):
+    def __init__(self, port: Optional[str] = None, baudrate: Optional[int] = None, simulation: bool = False, transport: Optional[str] = None):
+        defaults = load_connection_settings()
+        port = defaults["port"] if port is None else port
+        baudrate = defaults["baudrate"] if baudrate is None else baudrate
         self.ctrl = HandController(
             port=port,
             baudrate=baudrate,
             protocol=ProtocolType.UHAND_UNO,
-            simulation_mode=simulation
+            simulation_mode=simulation,
+            transport=transport,
         )
         self.log_history: List[str] = []
         self.ctrl.on_log = self._handle_log
@@ -74,10 +79,16 @@ class TerminalMenuApp:
 
         # Connection status block
         status_color = Colors.GREEN if self.ctrl.is_connected() else Colors.RED
-        mode_str = "SIMULATION" if self.ctrl.simulation_mode else f"SERIAL ({self.ctrl.port} @ {self.ctrl.baudrate}bps)"
+        if self.ctrl.simulation_mode:
+            mode_str = "SIMULATION"
+        elif self.ctrl.transport == "ble":
+            mode_str = f"BLE ({self.ctrl.ble_name} / {self.ctrl.ble_address})"
+        else:
+            mode_str = f"SERIAL ({self.ctrl.port} @ {self.ctrl.baudrate}bps)"
         conn_str = f"{status_color}{'CONNECTED' if self.ctrl.is_connected() else 'DISCONNECTED'} [{mode_str}]{Colors.END}"
         proto_str = f"{Colors.YELLOW}{self.ctrl.protocol.value}{Colors.END}"
         print(f" Status:   {conn_str} | Protocol: {proto_str}")
+        print(f" {Colors.RED}RED DEFAULTS: Hiwonder Bluetooth LE UART; Wonderbot A-F angle commands{Colors.END}")
 
         # Current angles visualization
         names = ["Thumb", "Index", "Mid", "Ring", "Pinky", "Wrist"]
@@ -108,10 +119,7 @@ class TerminalMenuApp:
         print(f"{Colors.BLUE}[INIT] Initializing uHand UNO on {self.ctrl.port}...{Colors.END}")
         success, msg = self.ctrl.connect()
         if not success:
-            print(f"{Colors.YELLOW}[NOTICE] {msg}{Colors.END}")
-            print("Defaulting to Simulation Mode for full offline control test.")
-            self.ctrl.simulation_mode = True
-            self.ctrl.connect()
+            print(f"{Colors.RED}[DISCONNECTED] {msg}{Colors.END}")
 
         time.sleep(0.5)
 
@@ -127,7 +135,7 @@ class TerminalMenuApp:
             print(f"  {Colors.GREEN}[6]{Colors.END} Peripheral Controls (Buzzer & RGB LED)")
             print(f"  {Colors.GREEN}[7]{Colors.END} Calibration & Trims (Hardware Inversion & Limits)")
             print(f"  {Colors.GREEN}[8]{Colors.END} Raw Hex Packet Tool (Reverse Engineering & Sniffing)")
-            print(f"  {Colors.GREEN}[9]{Colors.END} Serial Connection Settings (COM Port / Baud / Simulation)")
+            print(f"  {Colors.GREEN}[9]{Colors.END} Connection Settings (Bluetooth LE / Serial / Simulation)")
             print(f"  {Colors.RED}[0]{Colors.END} Exit Program")
             print()
 
@@ -211,7 +219,7 @@ class TerminalMenuApp:
             elif choice in ("C", "ALL CLOSE"):
                 self.ctrl.send_angles([0, 0, 0, 0, 0, 90])
             elif choice in ("N", "NEUTRAL"):
-                self.ctrl.send_angles([90, 90, 90, 90, 90, 90])
+                self.ctrl.send_angles([90, 90, 90, 90, 90, 90], force=True)
             elif choice == "A":
                 raw = input("Enter 6 comma-separated angles (0-180): ").strip()
                 try:
@@ -481,7 +489,9 @@ class TerminalMenuApp:
         while True:
             clear_screen()
             self.print_header()
-            print(f"{Colors.BOLD}RAW HEX PACKET INJECTOR:{Colors.END}")
+            print(f"{Colors.BOLD}RAW HEX PACKET INJECTOR (SERIAL UART ONLY):{Colors.END}")
+            if self.ctrl.transport == "ble":
+                print(f"{Colors.YELLOW}Select serial UART in Connection Settings to send AA 77 packets.{Colors.END}")
             print("Common examples:")
             print("  AA 77 01 06 5A 5A 5A 5A 5A 5A DC  -> Move all servos to 90°")
             print("  AA 77 01 06 B4 B4 B4 B4 B4 5A A2  -> Open fingers (180°), Wrist 90°")
@@ -504,47 +514,58 @@ class TerminalMenuApp:
             clear_screen()
             self.print_header()
             print(f"{Colors.BOLD}COMMUNICATION SETTINGS:{Colors.END}")
-            print(f"  Current Port:       {self.ctrl.port}")
-            print(f"  Current Baud Rate:  {self.ctrl.baudrate}")
+            print(f"  Transport:          {self.ctrl.transport.upper()}")
+            print(f"  BLE Device:         {self.ctrl.ble_name} ({self.ctrl.ble_address})")
+            print(f"  Serial Port:        {self.ctrl.port or 'not selected'}")
+            print(f"  Serial Baud Rate:   {self.ctrl.baudrate}")
             print(f"  Simulation Mode:    {self.ctrl.simulation_mode}")
             print(f"  Protocol:           {self.ctrl.protocol.value}")
             print()
-            print("  [1] Change COM Port (Default: COM3)")
-            print("  [2] Change Baud Rate (9600, 115200)")
-            print("  [3] Toggle Simulation Mode (Virtual Hand)")
-            print("  [4] Toggle Protocol (uHand UNO vs Lobot Bus)")
-            print("  [5] Reconnect / Reset Port")
-            print("  [6] Disconnect Port")
+            print(f"  {Colors.RED}RED default transport: Bluetooth LE to Hiwonder; protocol A-F + angle + $ {Colors.END}")
+            print("  [1] Select Bluetooth LE transport")
+            print("  [2] Select serial UART transport")
+            print("  [3] Change Hiwonder BLE name or address")
+            print("  [4] Change Serial COM Port")
+            print("  [5] Toggle Simulation Mode (Virtual Hand)")
+            print("  [6] Toggle Serial Protocol (uHand UNO vs Lobot Bus)")
+            print("  [7] Reconnect")
+            print("  [8] Disconnect")
             print("  [0] Back to Main Menu")
             print()
 
-            opt = input("Select setting [1-6, 0]: ").strip()
+            opt = input("Select setting [1-8, 0]: ").strip()
             if opt == "0":
                 break
             elif opt == "1":
-                new_port = input(f"Enter port name [Default: COM3]: ").strip().upper()
+                self.ctrl.transport = "ble"
+            elif opt == "2":
+                self.ctrl.transport = "serial"
+            elif opt == "3":
+                new_name = input(f"Enter BLE device name [Current: {self.ctrl.ble_name}]: ").strip()
+                if new_name:
+                    self.ctrl.ble_name = new_name
+                    self.ctrl.ble_address = ""
+            elif opt == "4":
+                new_port = input(f"Enter serial COM port [Current: {self.ctrl.port or 'none'}]: ").strip().upper()
                 if new_port:
                     self.ctrl.port = new_port
-            elif opt == "2":
-                new_baud = input("Enter baud rate (9600 / 115200): ").strip()
-                if new_baud.isdigit():
-                    self.ctrl.baudrate = int(new_baud)
-            elif opt == "3":
+            elif opt == "5":
                 self.ctrl.simulation_mode = not self.ctrl.simulation_mode
+                self.ctrl.disconnect()
                 self.ctrl.connect()
-            elif opt == "4":
+            elif opt == "6":
                 if self.ctrl.protocol == ProtocolType.UHAND_UNO:
                     self.ctrl.protocol = ProtocolType.LOBOT_BUS
                 else:
                     self.ctrl.protocol = ProtocolType.UHAND_UNO
-            elif opt == "5":
+            elif opt == "7":
                 self.ctrl.disconnect()
                 time.sleep(0.5)
                 self.ctrl.connect()
-            elif opt == "6":
+            elif opt == "8":
                 self.ctrl.disconnect()
 
 
 if __name__ == "__main__":
-    app = TerminalMenuApp(port="COM3", baudrate=9600)
+    app = TerminalMenuApp()
     app.run()
