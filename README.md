@@ -51,6 +51,10 @@ The serial transport uses the documented `AA 77` frame format at 9600 baud, 8N1.
 
 The Hiwonder uHand UNO app-control source and command format are documented in the official uHand UNO secondary-development guide.
 
-## Windows packaging
+## Windows download
 
-If you use Inno Setup to package HANDMOVE for Windows, download it from the [official Inno Setup downloads page](https://jrsoftware.org/isdl.php).
+[Download the HANDMOVE v1.3 setup](https://github.com/IamOumarIbrahim/handmove/releases/download/v1.3/HANDMOVE-Setup-v1.3.exe).
+
+The setup downloads the v1.3 repository archive from GitHub and extracts the source files to the selected folder. It does not install Python or the project dependencies; follow the Run instructions above to start HANDMOVE.
+
+To rebuild the setup, install [Inno Setup](https://jrsoftware.org/isdl.php), then run `installer/build-release.ps1` from PowerShell.

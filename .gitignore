@@ -5,3 +5,7 @@ __pycache__/
 # Local virtual environments
 .venv/
 venv/
+
+# Release installer build output and local compiler tools
+dist/
+.build-tools/
