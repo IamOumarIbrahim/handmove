@@ -17,7 +17,7 @@ The app scans for the saved `Hiwonder` device, connects to its BLE UART GATT ser
 
 Angles range from 0 to 180 degrees. The app sends channel changes directly and sends all six values for a grouped pose. The device enters app-control mode when it receives these commands. Bluetooth angle readback is not part of the documented app protocol, so the GUI's angle display reflects the requested positions.
 
-The red defaults are saved in `settings.json`: Bluetooth LE, Hiwonder device identity, GATT service and characteristic UUIDs, and the app command format. The desktop app also saves a newly selected Hiwonder GATT connection after it connects successfully.
+Connection defaults are saved in `settings.json`: Bluetooth LE, Hiwonder device identity, GATT service and characteristic UUIDs, and the app command format. The desktop app also saves a newly selected Hiwonder GATT connection after it connects successfully.
 
 ## Run
 
@@ -49,4 +49,8 @@ The serial transport uses the documented `AA 77` frame format at 9600 baud, 8N1.
 - RGB LED control and the app's fixed buzzer tone.
 - Optional calibration trims, limits, and simulated mode.
 
-`ref_uhand/` contains the uHandPi Raspberry Pi reference, which uses a different board and SDK. The Hiwonder uHand UNO app-control source and command format are documented in the official uHand UNO secondary-development guide.
+The Hiwonder uHand UNO app-control source and command format are documented in the official uHand UNO secondary-development guide.
+
+## Windows packaging
+
+If you use Inno Setup to package HANDMOVE for Windows, download it from the [official Inno Setup downloads page](https://jrsoftware.org/isdl.php).
