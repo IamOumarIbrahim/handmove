@@ -219,7 +219,7 @@ class HandController:
             if self.protocol == ProtocolType.UHAND_UNO:
                 try:
                     save_verified_serial_connection(self.port, self.baudrate, self.protocol.value)
-                    self.log("SYS", "Saved verified serial connection as the red default settings.")
+                    self.log("SYS", "Saved serial connection as default.")
                 except OSError as ex:
                     self.log("WARN", f"Connected, but could not save default settings: {ex}")
             self.log("SYS", msg)
@@ -306,7 +306,7 @@ class HandController:
             self.log("SYS", message)
             self.log("SYS", f"BLE UART: service {service_uuid}, characteristic {characteristic_uuid}")
             if saved:
-                self.log("SYS", "Saved this verified BLE connection as the red default settings.")
+                self.log("SYS", "Saved BLE connection as default.")
             if self.on_connection_changed:
                 self.on_connection_changed(True, message)
             return True, message

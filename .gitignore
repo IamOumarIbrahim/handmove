@@ -9,3 +9,6 @@ venv/
 # Release installer build output and local compiler tools
 dist/
 .build-tools/
+
+# Local datasets (multi-GB, never commit)
+data/

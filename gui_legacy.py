@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from controller import HandController, ProtocolType
 from connection_settings import list_ble_devices, list_serial_ports, load_connection_settings
 import gestures
+import hand_model
 
 
 class LegacyHandGUI:
@@ -40,7 +41,7 @@ class LegacyHandGUI:
 
     def __init__(self, root: tk.Tk, default_port: str = "", default_baud: int = 9600):
         self.root = root
-        self.root.title("uHand UNO Controller - Maximum Control Console")
+        self.root.title("uHand UNO Controller")
         self.root.geometry("1280x850")
         self.root.minsize(1100, 750)
         self.root.configure(bg=self.BG_COLOR)
@@ -113,18 +114,18 @@ class LegacyHandGUI:
         menubar.add_cascade(label="File", menu=file_menu)
 
         tools_menu = tk.Menu(menubar, tearoff=0)
-        tools_menu.add_command(label="All Servos Neutral (90°)", command=lambda: self._apply_pose([90]*6, force=True))
-        tools_menu.add_command(label="All Servos Open (180°)", command=lambda: self._apply_pose([180, 180, 180, 180, 180, 90]))
-        tools_menu.add_command(label="All Servos Closed (0°)", command=lambda: self._apply_pose([0, 0, 0, 0, 0, 90]))
+        tools_menu.add_command(label="Neutral (90°)", command=lambda: self._apply_pose([90]*6, force=True))
+        tools_menu.add_command(label="Open All (180°)", command=lambda: self._apply_pose([180, 180, 180, 180, 180, 90]))
+        tools_menu.add_command(label="Close All (0°)", command=lambda: self._apply_pose([0, 0, 0, 0, 0, 90]))
         tools_menu.add_separator()
-        tools_menu.add_command(label="Query Hardware Angles", command=self.ctrl.query_angles)
+        tools_menu.add_command(label="Read Angles", command=self.ctrl.query_angles)
         menubar.add_cascade(label="Quick Actions", menu=tools_menu)
 
         help_menu = tk.Menu(menubar, tearoff=0)
-        help_menu.add_command(label="Hardware & Wiring Pinout", command=self._show_pinout_help)
-        help_menu.add_command(label="Serial Protocol Specification", command=self._show_protocol_help)
+        help_menu.add_command(label="Wiring", command=self._show_pinout_help)
+        help_menu.add_command(label="Protocol", command=self._show_protocol_help)
         help_menu.add_separator()
-        help_menu.add_command(label="About uHand UNO Controller", command=self._show_about)
+        help_menu.add_command(label="About", command=self._show_about)
         menubar.add_cascade(label="Help", menu=help_menu)
 
         self.root.config(menu=menubar)
@@ -144,13 +145,13 @@ class LegacyHandGUI:
         self._draw_lamp("red")
 
         # The Hiwonder Bluetooth UART is the default PC control path.
-        tk.Label(bar, text="Transport (RED default):", font=("Tahoma", 9, "bold"), fg=self.DEFAULT_MARK_COLOR, bg=self.BG_COLOR).pack(side=tk.LEFT, padx=(4, 2))
+        tk.Label(bar, text="Link:", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR).pack(side=tk.LEFT, padx=(4, 2))
         self.transport_var = tk.StringVar(value="Bluetooth LE" if self.ctrl.transport == "ble" else "Serial UART")
         self.transport_combo = ttk.Combobox(bar, textvariable=self.transport_var, width=14, state="readonly", values=["Bluetooth LE", "Serial UART"], style="MarkedDefault.TCombobox")
         self.transport_combo.pack(side=tk.LEFT, padx=2)
         self.transport_combo.bind("<<ComboboxSelected>>", self._on_transport_changed)
 
-        self.ble_label = tk.Label(bar, text="BLE device:", font=("Tahoma", 9, "bold"), fg=self.DEFAULT_MARK_COLOR, bg=self.BG_COLOR)
+        self.ble_label = tk.Label(bar, text="Device:", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR)
         self.ble_label.pack(side=tk.LEFT, padx=(6, 2))
         self.ble_target_var = tk.StringVar(value=self._format_ble_target(self.ctrl.ble_name, self.ctrl.ble_address))
         self.ble_target_combo = ttk.Combobox(bar, textvariable=self.ble_target_var, width=22, values=[self.ble_target_var.get()], style="MarkedDefault.TCombobox")
@@ -159,7 +160,7 @@ class LegacyHandGUI:
         self.btn_refresh_ble.pack(side=tk.LEFT, padx=2)
 
         # Serial UART remains available as a secondary transport.
-        self.port_label = tk.Label(bar, text="COM port:", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR)
+        self.port_label = tk.Label(bar, text="Port:", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR)
         self.port_label.pack(side=tk.LEFT, padx=(8, 2))
         self.port_var = tk.StringVar(value=self.ctrl.port)
         port_values = [port["device"] for port in list_serial_ports()]
@@ -193,7 +194,7 @@ class LegacyHandGUI:
         # Simulation mode checkbox
         self.sim_var = tk.BooleanVar(value=self.ctrl.simulation_mode)
         self.sim_check = tk.Checkbutton(
-            bar, text="Simulation Mode", variable=self.sim_var,
+            bar, text="Simulate", variable=self.sim_var,
             bg=self.BG_COLOR, font=("Tahoma", 9), command=self._on_sim_toggled
         )
         self.sim_check.pack(side=tk.LEFT, padx=8)
@@ -220,17 +221,12 @@ class LegacyHandGUI:
 
         # Emergency Stop / Neutral
         self.btn_estop = tk.Button(
-            bar, text="E-STOP / NEUTRAL", font=("Tahoma", 9, "bold"), fg="red", bg="#FFE4E1",
+            bar, text="E-STOP", font=("Tahoma", 9, "bold"), fg="red", bg="#FFE4E1",
             relief=tk.RAISED, bd=2, padx=8, command=self._on_estop_clicked
         )
         self.btn_estop.pack(side=tk.RIGHT, padx=6)
         self._on_transport_changed()
 
-        tk.Label(
-            self.root,
-            text="RED = Hiwonder BLE UART defaults. Servo commands use the same A-F angle format as Wonderbot; no hand-side wiring is needed.",
-            font=("Tahoma", 8, "bold"), fg=self.DEFAULT_MARK_COLOR, bg=self.BG_COLOR, anchor=tk.W
-        ).pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 2))
 
     def _refresh_serial_ports(self) -> None:
         """Refresh the port selector from ports currently present on this computer."""
@@ -251,12 +247,12 @@ class LegacyHandGUI:
         return value.strip() or "Hiwonder", ""
 
     def _refresh_ble_devices(self) -> None:
-        self.status_bar.config(text="Searching for nearby Bluetooth LE devices…")
+        self.status_bar.config(text="Scanning…")
         devices = list_ble_devices(timeout=4.0)
         values = [self._format_ble_target(item["name"], item["address"]) for item in devices]
         self.ble_target_combo.configure(values=values or [self.ble_target_var.get()])
         self.ctrl.log("SYS", "Nearby BLE devices: " + (", ".join(values) if values else "none found"))
-        self.status_bar.config(text=f"Bluetooth scan complete: {len(values)} device(s) found")
+        self.status_bar.config(text=f"{len(values)} device(s) found")
 
     def _draw_lamp(self, color: str) -> None:
         """Update connection indicator circle."""
@@ -277,7 +273,7 @@ class LegacyHandGUI:
         paned.add(left_frame, minsize=380, width=420)
         self._build_servo_controls(left_frame)
 
-        # 2. Center Frame: 2D Visual Robotic Hand Canvas
+        # 2. Center Frame: 3D hand model (2D schematic fallback)
         center_frame = tk.Frame(paned, bg=self.BG_COLOR, bd=2, relief=tk.SUNKEN)
         paned.add(center_frame, minsize=320, width=380)
         self._build_hand_canvas(center_frame)
@@ -296,7 +292,7 @@ class LegacyHandGUI:
         title_bar = tk.Frame(parent, bg=self.ACCENT_COLOR, bd=1, relief=tk.RAISED)
         title_bar.pack(fill=tk.X, padx=2, pady=2)
         tk.Label(
-            title_bar, text="SERVO CHANNELS (0 - 180°)", fg="white", bg=self.ACCENT_COLOR,
+            title_bar, text="SERVOS", fg="white", bg=self.ACCENT_COLOR,
             font=("Tahoma", 10, "bold"), anchor="w", padx=6
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
@@ -316,7 +312,7 @@ class LegacyHandGUI:
         # 6 Servo cards
         for idx, name in enumerate(HandController.SERVO_NAMES):
             card = tk.LabelFrame(
-                scroll_content, text=f"Channel {idx + 1}: {name}",
+                scroll_content, text=f"S{idx + 1} {name}",
                 font=("Tahoma", 9, "bold"), bg=self.BG_COLOR, bd=2, relief=tk.GROOVE
             )
             card.pack(fill=tk.X, padx=4, pady=3)
@@ -380,24 +376,24 @@ class LegacyHandGUI:
             spin_trim.pack(side=tk.LEFT, padx=2)
 
         # Master Buttons
-        master_box = tk.LabelFrame(scroll_content, text="Master Actions", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR)
+        master_box = tk.LabelFrame(scroll_content, text="All", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR)
         master_box.pack(fill=tk.X, padx=4, pady=6)
 
         m_row = tk.Frame(master_box, bg=self.BG_COLOR)
         m_row.pack(fill=tk.X, padx=4, pady=4)
 
         tk.Button(
-            m_row, text="All Open (180°)", font=("Tahoma", 8, "bold"), bg="#D4D0C8",
+            m_row, text="Open", font=("Tahoma", 8, "bold"), bg="#D4D0C8",
             relief=tk.RAISED, bd=2, command=lambda: self._apply_pose([180, 180, 180, 180, 180, 90])
         ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
         tk.Button(
-            m_row, text="Neutral (90°)", font=("Tahoma", 8, "bold"), bg="#D4D0C8",
+            m_row, text="Neutral", font=("Tahoma", 8, "bold"), bg="#D4D0C8",
             relief=tk.RAISED, bd=2, command=lambda: self._apply_pose([90]*6, force=True)
         ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
         tk.Button(
-            m_row, text="All Closed (0°)", font=("Tahoma", 8, "bold"), bg="#D4D0C8",
+            m_row, text="Close", font=("Tahoma", 8, "bold"), bg="#D4D0C8",
             relief=tk.RAISED, bd=2, command=lambda: self._apply_pose([0, 0, 0, 0, 0, 90])
         ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
@@ -405,10 +401,10 @@ class LegacyHandGUI:
         sm_row = tk.Frame(master_box, bg=self.BG_COLOR)
         sm_row.pack(fill=tk.X, padx=4, pady=(2, 4))
         tk.Checkbutton(
-            sm_row, text="Smooth Interpolation", variable=self.smooth_move_var,
+            sm_row, text="Smooth", variable=self.smooth_move_var,
             bg=self.BG_COLOR, font=("Tahoma", 8)
         ).pack(side=tk.LEFT)
-        tk.Label(sm_row, text="Duration (ms):", bg=self.BG_COLOR, font=("Tahoma", 8)).pack(side=tk.LEFT, padx=(6, 2))
+        tk.Label(sm_row, text="ms:", bg=self.BG_COLOR, font=("Tahoma", 8)).pack(side=tk.LEFT, padx=(6, 2))
         tk.Spinbox(sm_row, from_=50, to=3000, increment=50, width=5, textvariable=self.smooth_dur_var, font=("Tahoma", 8)).pack(side=tk.LEFT)
 
     # =========================================================================
@@ -416,28 +412,96 @@ class LegacyHandGUI:
     # =========================================================================
 
     def _build_hand_canvas(self, parent: tk.Frame) -> None:
-        """Center canvas drawing the robotic hand and joints in real time."""
+        """Center viewport: 3D OpenGL model of the uHand UNO, with the 2D schematic as fallback."""
         title_bar = tk.Frame(parent, bg=self.ACCENT_COLOR, bd=1, relief=tk.RAISED)
         title_bar.pack(fill=tk.X, padx=2, pady=2)
         tk.Label(
-            title_bar, text="ROBOTIC HAND SCHEMATIC VISUALIZER", fg="white", bg=self.ACCENT_COLOR,
+            title_bar, text="HAND", fg="white", bg=self.ACCENT_COLOR,
             font=("Tahoma", 10, "bold"), anchor="w", padx=6
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._view_title_bar = title_bar
 
-        self.canvas = tk.Canvas(parent, bg=self.CANVAS_BG, bd=2, relief=tk.SUNKEN, highlightthickness=0)
-        self.canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self.gl_view = None
+        self.view_mode_var = tk.StringVar(value="3D")
+        self.hand_view_host = tk.Frame(parent, bg=self.CANVAS_BG, bd=2, relief=tk.SUNKEN)
+        self.hand_view_host.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        self.canvas = tk.Canvas(self.hand_view_host, bg=self.CANVAS_BG, highlightthickness=0)
         self.canvas.bind("<Configure>", lambda e: self._render_hand_canvas())
 
-        # Subtext legend
+        reason = hand_model.opengl_available()
+        if not reason:
+            try:
+                from hand_model.gl_view import HandGLView
+                self.gl_view = HandGLView(self.hand_view_host, width=380, height=480)
+                self.gl_view.set_angles(self.ctrl.current_angles, immediate=True)
+            except Exception as exc:  # driver / context problems
+                reason = f"{type(exc).__name__}: {exc}"
+                self.gl_view = None
+        self.gl_unavailable_reason = reason
+
+        # View toolbar
+        toolbar = tk.Frame(parent, bg=self.BG_COLOR)
+        toolbar.pack(fill=tk.X, padx=4, pady=(0, 2))
+        if self.gl_view is not None:
+            tk.Label(toolbar, text="View:", font=("Tahoma", 8), bg=self.BG_COLOR).pack(side=tk.LEFT)
+            for name in ("Iso", "Back", "Palm", "Side", "Top"):
+                tk.Button(toolbar, text=name, font=("Tahoma", 8), padx=4, pady=0,
+                          command=lambda n=name: self.gl_view.set_view(n)).pack(side=tk.LEFT, padx=1)
+            for mode in ("2D", "3D"):
+                tk.Radiobutton(
+                    self._view_title_bar, text=mode, value=mode, variable=self.view_mode_var,
+                    command=self._show_hand_view, fg="white", bg=self.ACCENT_COLOR,
+                    selectcolor=self.ACCENT_COLOR, activebackground=self.ACCENT_COLOR,
+                    font=("Tahoma", 8, "bold")
+                ).pack(side=tk.RIGHT)
+            hint = "Drag orbit · Right-drag pan · Wheel zoom · Double-click reset"
+        else:
+            self.view_mode_var.set("2D")
+            hint = "3D unavailable: pip install PyOpenGL pyopengltk numpy"
+            if reason:
+                print(f"[HANDMOVE] 3D view disabled: {reason}")
+
         legend_frame = tk.Frame(parent, bg=self.BG_COLOR)
         legend_frame.pack(fill=tk.X, padx=4, pady=(0, 4))
         tk.Label(
-            legend_frame, text="Interactive: Visual posture updates with angles. Wrist: S6 rotates base.",
-            font=("Tahoma", 8, "italic"), bg=self.BG_COLOR, fg="#555555"
+            legend_frame, text=hint, font=("Tahoma", 8, "italic"), bg=self.BG_COLOR, fg="#555555"
         ).pack(side=tk.LEFT, padx=4)
+        self._show_hand_view()
+
+    def _show_hand_view(self) -> None:
+        """Swap between the 3D OpenGL viewport and the 2D schematic canvas."""
+        use_3d = self.gl_view is not None and self.view_mode_var.get() == "3D"
+        if use_3d:
+            self.canvas.pack_forget()
+            self.gl_view.pack(fill=tk.BOTH, expand=True)
+            self.gl_view.set_angles(self.ctrl.current_angles, immediate=True)
+        else:
+            if self.gl_view is not None:
+                self.gl_view.pack_forget()
+            self.canvas.pack(fill=tk.BOTH, expand=True)
+            self.root.after_idle(self._render_hand_canvas)
+
+    def _highlight_channel(self, ch: int) -> None:
+        """Tint the moving finger in the 3D view briefly while its control is used."""
+        if self.gl_view is None:
+            return
+        self.gl_view.highlight_channel = ch
+        if getattr(self, "_highlight_job", None):
+            self.root.after_cancel(self._highlight_job)
+
+        def clear():
+            self._highlight_job = None
+            if self.gl_view is not None:
+                self.gl_view.highlight_channel = None
+                self.gl_view.request_redraw()
+        self._highlight_job = self.root.after(700, clear)
 
     def _render_hand_canvas(self) -> None:
-        """Draw the robotic hand geometry on the canvas reflecting current angles."""
+        """Draw the robotic hand reflecting current angles (3D view, or 2D schematic)."""
+        if self.gl_view is not None and self.view_mode_var.get() == "3D":
+            self.gl_view.set_angles(self.ctrl.current_angles)
+            return
         self.canvas.delete("all")
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
@@ -479,7 +543,7 @@ class LegacyHandGUI:
         b_p4 = transform(cx - base_w/2, cy + 30 + base_h)
         self.canvas.create_polygon([b_p1, b_p2, b_p3, b_p4], fill="#1E2A38", outline="#4A6572", width=2)
         self.canvas.create_text(
-            *transform(cx, cy + 50), text=f"WRIST S6: {wrist_angle}°",
+            *transform(cx, cy + 50), text=f"Wrist {wrist_angle}°",
             fill="#E5C07B", font=("Tahoma", 8, "bold")
         )
 
@@ -568,12 +632,12 @@ class LegacyHandGUI:
 
         # Tab 1: Preset Gestures
         tab_presets = tk.Frame(notebook, bg=self.BG_COLOR)
-        notebook.add(tab_presets, text=" Gestures & Poses ")
+        notebook.add(tab_presets, text=" Poses ")
         self._build_tab_presets(tab_presets)
 
         # Tab 2: Sequence Recorder & Player
         tab_seq = tk.Frame(notebook, bg=self.BG_COLOR)
-        notebook.add(tab_seq, text=" Sequence Recorder ")
+        notebook.add(tab_seq, text=" Sequence ")
         self._build_tab_sequencer(tab_seq)
 
         # Tab 3: Peripherals (Buzzer & RGB LED)
@@ -588,11 +652,6 @@ class LegacyHandGUI:
 
     def _build_tab_presets(self, parent: tk.Frame) -> None:
         """Tab with grid of buttons for all preset gestures."""
-        top_lbl = tk.Label(
-            parent, text="CLICK ANY PRESET GESTURE TO ACTUATE IMMEDIATELY:",
-            font=("Tahoma", 9, "bold"), bg=self.BG_COLOR, fg=self.ACCENT_COLOR
-        )
-        top_lbl.pack(anchor="w", padx=6, pady=6)
 
         # Scrollable button grid
         c = tk.Canvas(parent, bg=self.BG_COLOR, highlightthickness=0)
@@ -609,7 +668,7 @@ class LegacyHandGUI:
         cols = 2
         for idx, (name, pose) in enumerate(gestures.PRESET_POSES.items()):
             btn = tk.Button(
-                grid_frame, text=f"{name}\n{pose}", font=("Tahoma", 8, "bold"),
+                grid_frame, text=name, font=("Tahoma", 8, "bold"),
                 bg="#D4D0C8", relief=tk.RAISED, bd=2, width=22, height=2,
                 command=lambda p=pose: self._apply_pose(list(p))
             )
@@ -621,17 +680,17 @@ class LegacyHandGUI:
         ctrl_frame.pack(fill=tk.X, padx=4, pady=4)
 
         tk.Button(
-            ctrl_frame, text="+ Capture Current Pose", font=("Tahoma", 8, "bold"),
+            ctrl_frame, text="+ Capture", font=("Tahoma", 8, "bold"),
             bg="#D4D0C8", relief=tk.RAISED, bd=2, command=self._capture_frame
         ).pack(side=tk.LEFT, padx=2)
 
         tk.Button(
-            ctrl_frame, text="Delete Frame", font=("Tahoma", 8),
+            ctrl_frame, text="Delete", font=("Tahoma", 8),
             bg="#D4D0C8", relief=tk.RAISED, bd=2, command=self._delete_frame
         ).pack(side=tk.LEFT, padx=2)
 
         tk.Button(
-            ctrl_frame, text="Clear All", font=("Tahoma", 8),
+            ctrl_frame, text="Clear", font=("Tahoma", 8),
             bg="#D4D0C8", relief=tk.RAISED, bd=2, command=self._clear_frames
         ).pack(side=tk.LEFT, padx=2)
 
@@ -649,14 +708,14 @@ class LegacyHandGUI:
         seq_sb.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Playback controls
-        play_frame = tk.LabelFrame(parent, text="Playback Engine", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR)
+        play_frame = tk.LabelFrame(parent, text="Playback", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR)
         play_frame.pack(fill=tk.X, padx=4, pady=4)
 
         p1 = tk.Frame(play_frame, bg=self.BG_COLOR)
         p1.pack(fill=tk.X, padx=4, pady=2)
 
         self.btn_play_seq = tk.Button(
-            p1, text="Play Sequence", font=("Tahoma", 9, "bold"), bg="#D4D0C8",
+            p1, text="Play", font=("Tahoma", 9, "bold"), bg="#D4D0C8",
             relief=tk.RAISED, bd=2, padx=8, command=self._play_custom_sequence
         )
         self.btn_play_seq.pack(side=tk.LEFT, padx=2)
@@ -677,7 +736,7 @@ class LegacyHandGUI:
         # Preset sequences
         p2 = tk.Frame(play_frame, bg=self.BG_COLOR)
         p2.pack(fill=tk.X, padx=4, pady=4)
-        tk.Label(p2, text="Load Preset Animation:", font=("Tahoma", 8, "bold"), bg=self.BG_COLOR).pack(side=tk.LEFT, padx=2)
+        tk.Label(p2, text="Presets:", font=("Tahoma", 8, "bold"), bg=self.BG_COLOR).pack(side=tk.LEFT, padx=2)
 
         for sname in ["Wave", "Counting 1-5", "Finger Dance / Strum", "Grab & Release"]:
             btn = tk.Button(
@@ -689,7 +748,7 @@ class LegacyHandGUI:
     def _build_tab_peripherals(self, parent: tk.Frame) -> None:
         """Buzzer and RGB LED controls on the expansion shield."""
         # RGB LED Box
-        rgb_box = tk.LabelFrame(parent, text="RGB LED (WS2812 / 0x03 FUNC_SET_RGB)", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR)
+        rgb_box = tk.LabelFrame(parent, text="RGB LED", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR)
         rgb_box.pack(fill=tk.X, padx=4, pady=4)
 
         # Color presets
@@ -735,27 +794,27 @@ class LegacyHandGUI:
         self.swatch.pack(side=tk.LEFT, padx=6)
 
         tk.Button(
-            sl_frame, text="Send RGB", font=("Tahoma", 8, "bold"), bg="#D4D0C8",
+            sl_frame, text="Send", font=("Tahoma", 8, "bold"), bg="#D4D0C8",
             relief=tk.RAISED, bd=2, command=lambda: self._apply_rgb(self.r_var.get(), self.g_var.get(), self.b_var.get())
         ).pack(side=tk.LEFT, padx=2)
 
         # Buzzer Box
-        buz_box = tk.LabelFrame(parent, text="Buzzer (0x02 FUNC_SET_BUZZER)", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR)
+        buz_box = tk.LabelFrame(parent, text="Buzzer", font=("Tahoma", 9, "bold"), bg=self.BG_COLOR)
         buz_box.pack(fill=tk.X, padx=4, pady=6)
 
         b_row = tk.Frame(buz_box, bg=self.BG_COLOR)
         b_row.pack(fill=tk.X, padx=4, pady=4)
 
-        tk.Label(b_row, text="Freq (Hz):", font=("Tahoma", 8, "bold"), bg=self.BG_COLOR).pack(side=tk.LEFT, padx=2)
+        tk.Label(b_row, text="Hz:", font=("Tahoma", 8, "bold"), bg=self.BG_COLOR).pack(side=tk.LEFT, padx=2)
         self.buz_freq_var = tk.IntVar(value=1000)
         tk.Spinbox(b_row, from_=100, to=5000, increment=50, width=6, textvariable=self.buz_freq_var, font=("Tahoma", 9)).pack(side=tk.LEFT, padx=2)
 
-        tk.Label(b_row, text="Duration (ms):", font=("Tahoma", 8, "bold"), bg=self.BG_COLOR).pack(side=tk.LEFT, padx=(8, 2))
+        tk.Label(b_row, text="ms:", font=("Tahoma", 8, "bold"), bg=self.BG_COLOR).pack(side=tk.LEFT, padx=(8, 2))
         self.buz_dur_var = tk.IntVar(value=200)
         tk.Spinbox(b_row, from_=50, to=3000, increment=50, width=6, textvariable=self.buz_dur_var, font=("Tahoma", 9)).pack(side=tk.LEFT, padx=2)
 
         tk.Button(
-            b_row, text="BEEP!", font=("Tahoma", 9, "bold"), bg="#D4D0C8",
+            b_row, text="Beep", font=("Tahoma", 9, "bold"), bg="#D4D0C8",
             relief=tk.RAISED, bd=2, padx=8,
             command=lambda: self.ctrl.set_buzzer(self.buz_freq_var.get(), self.buz_dur_var.get())
         ).pack(side=tk.LEFT, padx=8)
@@ -763,7 +822,7 @@ class LegacyHandGUI:
         # Chimes
         c_row = tk.Frame(buz_box, bg=self.BG_COLOR)
         c_row.pack(fill=tk.X, padx=4, pady=(0, 4))
-        for tone_name, freq in [("Low (440Hz)", 440), ("Mid (880Hz)", 880), ("High (1760Hz)", 1760), ("Alert (2500Hz)", 2500)]:
+        for tone_name, freq in [("440", 440), ("880", 880), ("1760", 1760), ("2500", 2500)]:
             tk.Button(
                 c_row, text=tone_name, font=("Tahoma", 7), bg="#D4D0C8", relief=tk.RAISED, bd=1,
                 command=lambda f=freq: self.ctrl.set_buzzer(f, 150)
@@ -771,16 +830,11 @@ class LegacyHandGUI:
 
     def _build_tab_calibration(self, parent: tk.Frame) -> None:
         """Trims, hardware limits, and axis inversions."""
-        tk.Label(
-            parent, text="HARDWARE OFFSETS & LIMIT CALIBRATION:",
-            font=("Tahoma", 9, "bold"), bg=self.BG_COLOR, fg=self.ACCENT_COLOR
-        ).pack(anchor="w", padx=6, pady=4)
-
         box = tk.Frame(parent, bg=self.BG_COLOR)
         box.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
 
         # Header
-        headers = ["Channel", "Trim (-45..+45°)", "Invert", "Min Limit", "Max Limit"]
+        headers = ["Servo", "Trim", "Invert", "Min", "Max"]
         for col_idx, h in enumerate(headers):
             tk.Label(box, text=h, font=("Tahoma", 8, "bold"), bg="#D4D0C8", bd=1, relief=tk.GROOVE).grid(
                 row=0, column=col_idx, sticky="ew", padx=1, pady=2
@@ -791,7 +845,7 @@ class LegacyHandGUI:
 
         for ch in range(6):
             name = HandController.SERVO_NAMES[ch]
-            tk.Label(box, text=f"S{ch+1}: {name}", font=("Tahoma", 8), bg=self.BG_COLOR).grid(row=ch+1, column=0, sticky="w", padx=2)
+            tk.Label(box, text=f"S{ch+1} {name}", font=("Tahoma", 8), bg=self.BG_COLOR).grid(row=ch+1, column=0, sticky="w", padx=2)
 
             # Trim
             spin_t = tk.Spinbox(
@@ -829,9 +883,9 @@ class LegacyHandGUI:
         # Buttons
         b_frame = tk.Frame(parent, bg=self.BG_COLOR)
         b_frame.pack(fill=tk.X, padx=4, pady=6)
-        tk.Button(b_frame, text="Save Calibration File", font=("Tahoma", 8, "bold"), bg="#D4D0C8", relief=tk.RAISED, bd=2, command=self._save_calibration).pack(side=tk.LEFT, padx=2)
-        tk.Button(b_frame, text="Load Calibration File", font=("Tahoma", 8), bg="#D4D0C8", relief=tk.RAISED, bd=2, command=self._load_calibration).pack(side=tk.LEFT, padx=2)
-        tk.Button(b_frame, text="Reset to Defaults", font=("Tahoma", 8), bg="#D4D0C8", relief=tk.RAISED, bd=2, command=self._reset_calibration).pack(side=tk.LEFT, padx=2)
+        tk.Button(b_frame, text="Save", font=("Tahoma", 8, "bold"), bg="#D4D0C8", relief=tk.RAISED, bd=2, command=self._save_calibration).pack(side=tk.LEFT, padx=2)
+        tk.Button(b_frame, text="Load", font=("Tahoma", 8), bg="#D4D0C8", relief=tk.RAISED, bd=2, command=self._load_calibration).pack(side=tk.LEFT, padx=2)
+        tk.Button(b_frame, text="Reset", font=("Tahoma", 8), bg="#D4D0C8", relief=tk.RAISED, bd=2, command=self._reset_calibration).pack(side=tk.LEFT, padx=2)
 
     # =========================================================================
     # Bottom Pane: Serial Traffic & Reverse-Engineering Packet Console
@@ -840,7 +894,7 @@ class LegacyHandGUI:
     def _build_bottom_packet_console(self) -> None:
         """Bottom console for bidirectional packet inspection and hex injection."""
         panel = tk.LabelFrame(
-            self.root, text="Bidirectional Serial Packet Console & Reverse-Engineering Console",
+            self.root, text="Console",
             font=("Tahoma", 9, "bold"), bg=self.BG_COLOR, bd=2, relief=tk.GROOVE
         )
         panel.pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=2)
@@ -868,20 +922,20 @@ class LegacyHandGUI:
         inj_bar = tk.Frame(panel, bg=self.BG_COLOR)
         inj_bar.pack(fill=tk.X, padx=4, pady=3)
 
-        tk.Label(inj_bar, text="Raw UART packet (serial only):", font=("Tahoma", 8, "bold"), bg=self.BG_COLOR).pack(side=tk.LEFT, padx=2)
+        tk.Label(inj_bar, text="Hex:", font=("Tahoma", 8, "bold"), bg=self.BG_COLOR).pack(side=tk.LEFT, padx=2)
         self.hex_input_var = tk.StringVar(value="AA 77 01 06 5A 5A 5A 5A 5A 5A DC")
         self.hex_entry = tk.Entry(inj_bar, textvariable=self.hex_input_var, font=("Courier New", 9), width=42)
         self.hex_entry.pack(side=tk.LEFT, padx=2)
         self.hex_entry.bind("<Return>", lambda e: self._on_send_hex_clicked())
 
         self.hex_send_button = tk.Button(
-            inj_bar, text="Send Hex", font=("Tahoma", 8, "bold"), bg="#D4D0C8",
+            inj_bar, text="Send", font=("Tahoma", 8, "bold"), bg="#D4D0C8",
             relief=tk.RAISED, bd=2, command=self._on_send_hex_clicked
         )
         self.hex_send_button.pack(side=tk.LEFT, padx=2)
 
         tk.Button(
-            inj_bar, text="Clear Log", font=("Tahoma", 8), bg="#D4D0C8",
+            inj_bar, text="Clear", font=("Tahoma", 8), bg="#D4D0C8",
             relief=tk.RAISED, bd=2, command=lambda: self.console_txt.delete("1.0", tk.END)
         ).pack(side=tk.LEFT, padx=6)
 
@@ -893,7 +947,7 @@ class LegacyHandGUI:
     def _build_status_bar(self) -> None:
         """Footer status bar."""
         self.status_bar = tk.Label(
-            self.root, text="Ready | Hiwonder Bluetooth LE is the red default connection",
+            self.root, text="Ready",
             bd=1, relief=tk.SUNKEN, anchor=tk.W, font=("Tahoma", 8), bg="#D4D0C8"
         )
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
@@ -914,7 +968,7 @@ class LegacyHandGUI:
             self.ctrl.baudrate = 9600
 
         if not self.ctrl.port:
-            self.status_bar.config(text="DISCONNECTED: Select the uHand UART COM port")
+            self.status_bar.config(text="Disconnected: select a port")
             return
         self._connect_in_background(show_error=False)
 
@@ -922,7 +976,8 @@ class LegacyHandGUI:
         """Show BLE device settings by default, or serial options when selected."""
         is_ble = self.transport_var.get() == "Bluetooth LE"
         next_transport = "ble" if is_ble else "serial"
-        if self.ctrl.transport != next_transport and self.ctrl.is_connected():
+        changed = self.ctrl.transport != next_transport
+        if changed and self.ctrl.is_connected():
             self.ctrl.disconnect()
         ble_widgets = (self.ble_label, self.ble_target_combo, self.btn_refresh_ble)
         serial_widgets = (
@@ -940,12 +995,10 @@ class LegacyHandGUI:
             elif is_ble and widget.winfo_manager():
                 widget.pack_forget()
         self.ctrl.transport = next_transport
-        self.ctrl.log("SYS", f"Selected {'Hiwonder BLE app protocol' if is_ble else 'serial UART'} transport")
+        if changed:
+            self.ctrl.log("SYS", f"Transport: {'BLE' if is_ble else 'serial'}")
         if hasattr(self, "btn_query"):
-            self.btn_query.config(
-                state=tk.DISABLED if is_ble else tk.NORMAL,
-                text="Angle feedback unavailable" if is_ble else "Read Angles (serial)",
-            )
+            self.btn_query.config(state=tk.DISABLED if is_ble else tk.NORMAL)
         if hasattr(self, "hex_send_button"):
             self.hex_entry.config(state=tk.DISABLED if is_ble else tk.NORMAL)
             self.hex_send_button.config(state=tk.DISABLED if is_ble else tk.NORMAL)
@@ -1030,6 +1083,7 @@ class LegacyHandGUI:
             self.ctrl.set_servo_angle(ch, angle)
         else:
             self.ctrl.send_angles(angles)
+        self._highlight_channel(ch)
         self._render_hand_canvas()
 
     def _on_spin_changed(self, ch: int) -> None:
@@ -1122,13 +1176,13 @@ class LegacyHandGUI:
     def _play_custom_sequence(self) -> None:
         """Play current sequence list."""
         if not self.sequence_frames:
-            messagebox.showinfo("Sequencer", "Sequence buffer is empty. Capture frames first!")
+            messagebox.showinfo("Sequencer", "No frames captured.")
             return
         self.ctrl.play_sequence(
             self.sequence_frames,
             loop=self.loop_var.get(),
             speed_factor=self.speed_var.get(),
-            on_complete=lambda: self.status_bar.config(text="Sequence playback completed")
+            on_complete=lambda: self.status_bar.config(text="Sequence done")
         )
 
     def _load_preset_sequence(self, name: str) -> None:
@@ -1162,7 +1216,7 @@ class LegacyHandGUI:
             self.sequence_frames = [(tuple(item[0]), item[1]) for item in data]
             for idx, (pose, dur) in enumerate(self.sequence_frames, 1):
                 self.seq_listbox.insert(tk.END, f"#{idx:2d} | Pose: {pose} | {dur}ms")
-            messagebox.showinfo("Import", f"Loaded {len(self.sequence_frames)} frames!")
+            messagebox.showinfo("Import", f"Loaded {len(self.sequence_frames)} frames")
         except Exception as e:
             messagebox.showerror("Import Error", str(e))
 
@@ -1228,13 +1282,13 @@ class LegacyHandGUI:
                 self._draw_lamp(color)
                 self.btn_connect.config(state=tk.DISABLED)
                 self.btn_disconnect.config(state=tk.NORMAL)
-                prefix = "SIMULATION" if self.ctrl.simulation_mode else "CONNECTED"
+                prefix = "Simulation" if self.ctrl.simulation_mode else "Connected"
                 self.status_bar.config(text=f"{prefix}: {message}")
             else:
                 self._draw_lamp("red")
                 self.btn_connect.config(state=tk.NORMAL)
                 self.btn_disconnect.config(state=tk.DISABLED)
-                self.status_bar.config(text=f"DISCONNECTED: {message}")
+                self.status_bar.config(text=f"Disconnected: {message}")
             self.transport_combo.config(state="readonly")
             self.ble_target_combo.config(state=tk.NORMAL)
             self.port_combo.config(state=tk.NORMAL)
@@ -1252,7 +1306,7 @@ class LegacyHandGUI:
     def _on_sequence_step(self, step: int, total: int) -> None:
         """Update status bar with active sequence step."""
         def _update():
-            self.status_bar.config(text=f"Playing Sequence: Step {step}/{total}")
+            self.status_bar.config(text=f"Playing {step}/{total}")
         self.root.after(0, _update)
 
     # =========================================================================
@@ -1281,7 +1335,7 @@ class LegacyHandGUI:
             "Peripherals: Active Buzzer + WS2812 RGB LED\n"
             "External Power: 6V - 8.4V DC Jack (Batteries / Power Adapter)"
         )
-        messagebox.showinfo("Hardware & Wiring Guide", msg)
+        messagebox.showinfo("Wiring", msg)
 
     def _show_protocol_help(self) -> None:
         """Display protocol documentation dialog."""
@@ -1304,17 +1358,16 @@ class LegacyHandGUI:
             "  0x11: FUNC_READ_ANGLE (Len=0)\n"
             "        Packet: AA 77 11 00 EE -> returns angles"
         )
-        messagebox.showinfo("Protocol Specification", msg)
+        messagebox.showinfo("Protocol", msg)
 
     def _show_about(self) -> None:
         """About box."""
         msg = (
-            "uHand UNO Controller - Maximum Control Suite\n"
-            "Version 1.0 (Reverse-Engineer-Anything)\n\n"
-            "Developed for high-precision control of the Hiwonder uHand UNO bionic robotic hand.\n"
-            "Includes Python Terminal Menu, Legacy Tkinter GUI, and Full Simulation Engine."
+            "uHand UNO Controller\n"
+            "Version 1.0\n\n"
+            "Control and simulation for the Hiwonder uHand UNO."
         )
-        messagebox.showinfo("About uHand UNO Controller", msg)
+        messagebox.showinfo("About", msg)
 
 
 def launch_gui(port: Optional[str] = None, baud: Optional[int] = None, transport: Optional[str] = None) -> None:
