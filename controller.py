@@ -1,10 +1,9 @@
-"""
-Core Hardware Controller for Hiwonder uHand UNO and compatible robotic hands.
-Handles Hiwonder BLE and serial communications, protocol framing, calibration,
-kinematics state, preset sequences, and peripheral actuators (Buzzer, RGB LED).
-"""
+#   HANDMOVE - uHand UNO Controller (hardware controller)
+#        Oumar Ibrahim U22200741
 
-from __future__ import annotations
+# controller for the hiwonder uHand UNO robotic hand
+# does the BLE and serial connection, building the packets, calibration,
+# the angles, sequences and the buzzer / rgb led
 
 import enum
 import asyncio
@@ -14,7 +13,6 @@ import math
 import os
 import threading
 import time
-from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from connection_settings import (
     is_arduino_usb_port,
@@ -44,12 +42,9 @@ class ProtocolType(enum.Enum):
     LOBOT_BUS = "Lobot / Hiwonder Bus (0x55 0x55)"
 
 
+# talks to the uHand UNO over the BLE uart (same as the Wonderbot app),
+# the wired uart or a simulation with no hardware
 class HandController:
-    """
-    High-level controller for the uHand UNO robotic hand.
-    Supports the Wonderbot-compatible BLE UART, the wired uHand UNO UART, and offline simulation.
-    """
-
     NUM_SERVOS = 6
     SERVO_NAMES = [
         "Thumb",
@@ -60,30 +55,31 @@ class HandController:
         "Wrist / Base"
     ]
 
-    def __init__(
-        self,
-        port: str = "",
-        baudrate: int = 9600,
-        protocol: ProtocolType = ProtocolType.UHAND_UNO,
-        simulation_mode: bool = False,
-        transport: Optional[str] = None,
-        ble_name: Optional[str] = None,
-        ble_address: Optional[str] = None,
-    ):
+    def __init__(self, port="", baudrate=9600, protocol=ProtocolType.UHAND_UNO, simulation_mode=False,
+                 transport=None, ble_name=None, ble_address=None):
         defaults = load_connection_settings()
-        self.transport = (transport or defaults["transport"]).lower()
+        if transport:
+            self.transport = transport.lower()
+        else:
+            self.transport = defaults["transport"].lower()
         self.port = port
         self.baudrate = baudrate
         self.protocol = protocol
         self.simulation_mode = simulation_mode
-        self.ble_name = ble_name or defaults["ble_name"]
-        self.ble_address = ble_address or defaults["ble_address"]
+        if ble_name:
+            self.ble_name = ble_name
+        else:
+            self.ble_name = defaults["ble_name"]
+        if ble_address:
+            self.ble_address = ble_address
+        else:
+            self.ble_address = defaults["ble_address"]
         self.ble_service_uuid = defaults["ble_service_uuid"]
         self.ble_characteristic_uuid = defaults["ble_characteristic_uuid"]
 
-        self.ser: Optional[serial.Serial] = None
-        self._ble_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._ble_loop_thread: Optional[threading.Thread] = None
+        self.ser = None
+        self._ble_loop = None
+        self._ble_loop_thread = None
         self._ble_loop_ready = threading.Event()
         self._ble_client = None
         self._ble_characteristic = None
@@ -92,52 +88,56 @@ class HandController:
         self._ble_lock = asyncio.Lock()
         self._lock = threading.Lock()
         self._running = False
-        self._rx_thread: Optional[threading.Thread] = None
+        self._rx_thread = None
 
-        # Current state: logical angles (0 - 180 degrees)
+        # angles (0 - 180 degrees)
         self.current_angles = [90, 90, 90, 90, 90, 90]
         self.target_angles = [90, 90, 90, 90, 90, 90]
 
-        # Per-servo calibration trims (-45 to +45 deg) and inversion flags
+        # calibration: trim (-45 to +45 deg), invert and limits for each servo
         self.trims = [0, 0, 0, 0, 0, 0]
         self.inverted = [False, False, False, False, False, False]
         self.min_limits = [0, 0, 0, 0, 0, 0]
         self.max_limits = [180, 180, 180, 180, 180, 180]
 
-        # Peripherals state
+        # buzzer and led
         self.rgb_color = (0, 0, 0)
         self.last_buzzer = (0, 0)
 
-        # Sequence player state
-        self._seq_thread: Optional[threading.Thread] = None
+        # sequence player
+        self._seq_thread = None
         self._seq_stop_event = threading.Event()
         self._seq_pause_event = threading.Event()
         self._seq_pause_event.set()
         self.is_playing_sequence = False
 
-        # Callbacks
-        self.on_log: Optional[Callable[[str, str], None]] = None  # (direction, text)
-        self.on_angles_updated: Optional[Callable[[List[int]], None]] = None
-        self.on_connection_changed: Optional[Callable[[bool, str], None]] = None
-        self.on_sequence_step: Optional[Callable[[int, int], None]] = None
+        # callbacks for the gui
+        self.on_log = None  # (direction, text)
+        self.on_angles_updated = None  # (angles)
+        self.on_connection_changed = None  # (connected, message)
+        self.on_sequence_step = None  # (step, total)
         self._hardware_response = threading.Event()
 
-    # =========================================================================
-    # Connection Management
-    # =========================================================================
+    #==========================================================================
+    # connecting
 
-    def log(self, direction: str, text: str) -> None:
-        """Log transport or internal events."""
+    def log(self, direction, text):
         if self.on_log:
             try:
                 self.on_log(direction, text)
             except Exception:
                 pass
 
-    def connect(self) -> Tuple[bool, str]:
-        """Establish connection with the controller board."""
+    # tells the gui the connection failed and returns (False, msg)
+    def _fail(self, msg):
+        self.log("ERR", msg)
+        if self.on_connection_changed:
+            self.on_connection_changed(False, msg)
+        return False, msg
+
+    def connect(self):
         if self.simulation_mode:
-            self.log("SYS", f"Connected in Simulation Mode (Virtual uHand UNO)")
+            self.log("SYS", "Connected in Simulation Mode (Virtual uHand UNO)")
             if self.on_connection_changed:
                 self.on_connection_changed(True, "Simulation Mode")
             return True, "Simulation Mode Connected"
@@ -151,20 +151,14 @@ class HandController:
 
         if not SERIAL_AVAILABLE:
             msg = "pyserial is not installed; hardware connection is unavailable. Enable Simulation Mode explicitly to run offline."
-            self.log("ERR", msg)
-            if self.on_connection_changed:
-                self.on_connection_changed(False, msg)
-            return False, msg
+            return self._fail(msg)
 
         if not self.port.strip():
             msg = (
                 "No serial port selected. Connect a USB-to-TTL adapter to the uHand UNO UART, "
                 "then select its COM port (9600 baud, 8N1)."
             )
-            self.log("ERR", msg)
-            if self.on_connection_changed:
-                self.on_connection_changed(False, msg)
-            return False, msg
+            return self._fail(msg)
 
         if is_arduino_usb_port(self.port):
             msg = (
@@ -172,10 +166,7 @@ class HandController:
                 "Use a USB-to-TTL adapter on the hand's 4-pin UART: adapter RXD to IO12 (hand TX), "
                 "adapter TXD to IO10 (hand RX), and GND to GND. Select the adapter's COM port."
             )
-            self.log("ERR", msg)
-            if self.on_connection_changed:
-                self.on_connection_changed(False, msg)
-            return False, msg
+            return self._fail(msg)
 
         try:
             self.ser = serial.Serial()
@@ -186,7 +177,7 @@ class HandController:
             self.ser.stopbits = serial.STOPBITS_ONE
             self.ser.timeout = 0.2
             self.ser.write_timeout = 1.0
-            # Explicitly prevent DTR/RTS pulse so Arduino does NOT reset into midpoint mode
+            # no DTR/RTS pulse so the arduino does not reset into midpoint mode
             self.ser.dtr = False
             self.ser.rts = False
             self.ser.open()
@@ -196,6 +187,7 @@ class HandController:
             self._rx_thread.start()
 
             if self.protocol == ProtocolType.UHAND_UNO:
+                # ask for the angles to check the hand is realy there
                 query = self.build_uhand_packet(0x11, [])
                 self._send_raw(query, "uHand UNO connection check: FUNC_READ_ANGLE")
                 if not self._hardware_response.wait(timeout=1.5):
@@ -210,10 +202,7 @@ class HandController:
                         "the angle query. Check that this is the USB-to-TTL adapter connected to IO12/IO10, "
                         "that TX/RX are crossed with common GND, and that the hand is powered."
                     )
-                    self.log("ERR", msg)
-                    if self.on_connection_changed:
-                        self.on_connection_changed(False, msg)
-                    return False, msg
+                    return self._fail(msg)
 
             msg = f"Connected to {self.port} at {self.baudrate} baud"
             if self.protocol == ProtocolType.UHAND_UNO:
@@ -235,13 +224,9 @@ class HandController:
                     pass
             self.ser = None
             msg = f"Failed to connect to {self.port}: {ex}"
-            self.log("ERR", msg)
-            if self.on_connection_changed:
-                self.on_connection_changed(False, msg)
-            return False, msg
+            return self._fail(msg)
 
-    def disconnect(self) -> None:
-        """Close the active serial or BLE connection."""
+    def disconnect(self):
         self._running = False
         self.stop_sequence()
         if self._ble_loop and self._ble_connected:
@@ -270,27 +255,28 @@ class HandController:
         if self.on_connection_changed:
             self.on_connection_changed(False, "Disconnected")
 
-    def is_connected(self) -> bool:
-        """Check if connected (or running in simulation)."""
+    # simulation always counts as connected
+    def is_connected(self):
         if self.simulation_mode:
             return True
         if self.transport == "ble":
             return self._ble_connected
         return self.ser is not None and self.ser.is_open
 
-    def _connect_ble(self) -> Tuple[bool, str]:
-        """Connect to the Hiwonder BLE UART and select its transparent serial characteristic."""
+    # connects to the hiwonder ble uart and picks its serial characteristic
+    def _connect_ble(self):
         if not BLE_AVAILABLE:
             msg = "Bluetooth support requires bleak. Install dependencies with: python -m pip install -r requirements.txt"
-            self.log("ERR", msg)
-            if self.on_connection_changed:
-                self.on_connection_changed(False, msg)
-            return False, msg
+            return self._fail(msg)
 
         try:
             self._start_ble_loop()
             future = asyncio.run_coroutine_threadsafe(self._connect_ble_async(), self._ble_loop)
-            name, address, service_uuid, characteristic_uuid = future.result(timeout=20)
+            result = future.result(timeout=20)
+            name = result[0]
+            address = result[1]
+            service_uuid = result[2]
+            characteristic_uuid = result[3]
             self.ble_name = name
             self.ble_address = address
             self.ble_service_uuid = service_uuid
@@ -315,23 +301,22 @@ class HandController:
             self._ble_client = None
             self._ble_characteristic = None
             msg = f"Could not connect to the Hiwonder BLE device: {ex}"
-            self.log("ERR", msg)
-            if self.on_connection_changed:
-                self.on_connection_changed(False, msg)
-            return False, msg
+            return self._fail(msg)
 
-    def _start_ble_loop(self) -> None:
+    # bleak needs an asyncio loop, it runs on its own thread
+    def _start_ble_loop(self):
         if self._ble_loop and self._ble_loop.is_running():
             return
         self._ble_loop_ready.clear()
 
-        def run_loop() -> None:
+        def run_loop():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             self._ble_lock = asyncio.Lock()
             self._ble_loop = loop
             self._ble_loop_ready.set()
             loop.run_forever()
+            # loop was stopped, cancel what is left
             pending = asyncio.all_tasks(loop)
             for task in pending:
                 task.cancel()
@@ -344,63 +329,92 @@ class HandController:
         if not self._ble_loop_ready.wait(timeout=3):
             raise RuntimeError("BLE event loop did not start")
 
-    async def _connect_ble_async(self) -> Tuple[str, str, str, str]:
+    async def _connect_ble_async(self):
         devices = await BleakScanner.discover(timeout=5.0)
         device = None
+        # first look for the saved address
         if self.ble_address:
-            device = next((d for d in devices if d.address.casefold() == self.ble_address.casefold()), None)
+            for d in devices:
+                if d.address.casefold() == self.ble_address.casefold():
+                    device = d
+                    break
+        # then the name (it can also be an address)
         if device is None and self.ble_name:
             target = self.ble_name.casefold()
-            device = next(
-                (d for d in devices if d.address.casefold() == target),
-                None,
-            )
+            for d in devices:
+                if d.address.casefold() == target:
+                    device = d
+                    break
             if device is None:
-                device = next((d for d in devices if d.name and target in d.name.casefold()), None)
+                for d in devices:
+                    if d.name and target in d.name.casefold():
+                        device = d
+                        break
         if device is None:
-            found = ", ".join(f"{d.name or 'Unknown'} ({d.address})" for d in devices)
+            found_list = []
+            for d in devices:
+                if d.name:
+                    found_list.append(f"{d.name} ({d.address})")
+                else:
+                    found_list.append(f"Unknown ({d.address})")
+            found = ", ".join(found_list)
+            if not found:
+                found = "none"
+            wanted = self.ble_name
+            if not wanted:
+                wanted = "Hiwonder"
             raise RuntimeError(
-                f"'{self.ble_name or 'Hiwonder'}' is not advertising. Check that the hand is powered and nearby; "
+                f"'{wanted}' is not advertising. Check that the hand is powered and nearby; "
                 "disconnect Wonderbot or another phone from the hand before connecting the PC. "
-                f"Nearby BLE devices: {found or 'none'}"
+                f"Nearby BLE devices: {found}"
             )
 
         client = BleakClient(device)
         await client.connect()
         if not client.is_connected:
-            raise RuntimeError(f"BLE connection to {device.name or device.address} did not complete")
+            if device.name:
+                shown = device.name
+            else:
+                shown = device.address
+            raise RuntimeError(f"BLE connection to {shown} did not complete")
 
+        # every characteristic we can write to
         candidates = []
-        preferred_services = tuple(dict.fromkeys((
-            self.ble_service_uuid.casefold(),
-            "0000fff0-0000-1000-8000-00805f9b34fb",
-            "0000ffe0-0000-1000-8000-00805f9b34fb",
-        )))
+        preferred_services = []
+        for uuid in [self.ble_service_uuid.casefold(),
+                     "0000fff0-0000-1000-8000-00805f9b34fb",
+                     "0000ffe0-0000-1000-8000-00805f9b34fb"]:
+            if uuid not in preferred_services:
+                preferred_services.append(uuid)
         for service in client.services:
             for char in service.characteristics:
-                props = {p.casefold() for p in char.properties}
+                props = []
+                for p in char.properties:
+                    props.append(p.casefold())
                 if "write" in props or "write-without-response" in props:
                     candidates.append((service.uuid.casefold(), char, props))
 
+        wanted_char = self.ble_characteristic_uuid.casefold()
         selected = None
         for preferred_service in preferred_services:
-            selected = next(
-                (item for item in candidates
-                 if item[0] == preferred_service and item[1].uuid.casefold() == self.ble_characteristic_uuid.casefold()),
-                None,
-            )
+            for item in candidates:
+                if item[0] == preferred_service and item[1].uuid.casefold() == wanted_char:
+                    selected = item
+                    break
             if selected:
                 break
         if selected is None:
-            selected = next(
-                (item for item in candidates if item[1].uuid.casefold() == self.ble_characteristic_uuid.casefold()),
-                None,
-            )
+            for item in candidates:
+                if item[1].uuid.casefold() == wanted_char:
+                    selected = item
+                    break
         if selected is None:
             await client.disconnect()
             raise RuntimeError("The connected BLE device has no writable Hiwonder UART characteristic")
 
-        service_uuid, characteristic, properties = selected
+        service_uuid = selected[0]
+        characteristic = selected[1]
+        properties = selected[2]
         self._ble_client = client
         self._ble_characteristic = characteristic
         self._ble_write_response = "write" in properties
@@ -412,9 +426,14 @@ class HandController:
                 await client.start_notify(characteristic, self._on_ble_notification)
             except Exception as ex:
                 self.log("WARN", f"BLE notifications unavailable: {ex}")
-        return device.name or self.ble_name or "Hiwonder", device.address, service_uuid, characteristic.uuid
+        name = device.name
+        if not name:
+            name = self.ble_name
+        if not name:
+            name = "Hiwonder"
+        return name, device.address, service_uuid, characteristic.uuid
 
-    async def _disconnect_ble_async(self) -> None:
+    async def _disconnect_ble_async(self):
         if self._ble_client and self._ble_client.is_connected:
             try:
                 if self._ble_characteristic and "notify" in self._ble_characteristic.properties:
@@ -423,12 +442,12 @@ class HandController:
                 pass
             await self._ble_client.disconnect()
 
-    def _on_ble_notification(self, sender, data: bytearray) -> None:
+    def _on_ble_notification(self, sender, data):
         text = bytes(data).decode("utf-8", errors="replace").strip()
         if text:
             self.log("RX", f"BLE: {text}")
 
-    def _queue_ble_commands(self, commands: List[str], description: str = "") -> None:
+    def _queue_ble_commands(self, commands, description=""):
         if not self._ble_connected or not self._ble_loop or not self._ble_characteristic:
             self.log("ERR", "BLE command not sent: connect to the Hiwonder device first")
             return
@@ -436,7 +455,7 @@ class HandController:
             self.log("TX", f"BLE {command} ({description})")
         future = asyncio.run_coroutine_threadsafe(self._write_ble_commands(commands), self._ble_loop)
 
-        def report_error(completed) -> None:
+        def report_error(completed):
             try:
                 completed.result()
             except Exception as ex:
@@ -447,7 +466,7 @@ class HandController:
 
         future.add_done_callback(report_error)
 
-    async def _write_ble_commands(self, commands: List[str]) -> None:
+    async def _write_ble_commands(self, commands):
         async with self._ble_lock:
             if not self._ble_client or not self._ble_client.is_connected or not self._ble_characteristic:
                 raise RuntimeError("BLE connection closed before command was written")
@@ -456,76 +475,85 @@ class HandController:
                     self._ble_characteristic, command.encode("ascii"), response=self._ble_write_response
                 )
 
-    # =========================================================================
-    # Packet Builders & Protocol Framing
-    # =========================================================================
+    #==========================================================================
+    # packets
 
+    # uHand checksum = 0xFF - (sum & 0xFF)
     @staticmethod
-    def calc_uhand_checksum(func: int, length: int, data: bytes) -> int:
-        """Calculate uHand UNO checksum: 0xFF - (sum & 0xFF)."""
-        total = (func + length + sum(data)) & 0xFF
+    def calc_uhand_checksum(func, length, data):
+        total = func + length
+        for b in data:
+            total = total + b
+        total = total & 0xFF
         return (0xFF - total) & 0xFF
 
-    @classmethod
-    def build_uhand_packet(cls, func: int, data: Union[bytes, List[int]]) -> bytes:
-        """Build a native uHand UNO packet: 0xAA 0x77 <func> <len> <data...> <check>."""
+    # uHand packet: 0xAA 0x77 <func> <len> <data...> <check>
+    @staticmethod
+    def build_uhand_packet(func, data):
         if isinstance(data, list):
             data = bytes(data)
         length = len(data)
-        checksum = cls.calc_uhand_checksum(func, length, data)
+        checksum = HandController.calc_uhand_checksum(func, length, data)
         return bytes([0xAA, 0x77, func, length]) + data + bytes([checksum])
 
-    @classmethod
-    def build_lobot_packet(cls, cmd: int, params: List[int]) -> bytes:
-        """Build Lobot / Hiwonder Bus packet: 0x55 0x55 <len> <cmd> <params...>."""
+    # lobot / hiwonder bus packet: 0x55 0x55 <len> <cmd> <params...>
+    @staticmethod
+    def build_lobot_packet(cmd, params):
         length = len(params) + 2
         return bytes([0x55, 0x55, length, cmd]) + bytes(params)
 
-    # =========================================================================
-    # Angle Transformation & Clamping
-    # =========================================================================
+    #==========================================================================
+    # angles
 
-    def to_hardware_angle(self, channel_idx: int, logical_angle: int) -> int:
-        """Apply inversion, limits, and trim to calculate raw hardware angle (0-180)."""
-        # Clamp to configured limits
+    # limits, invert and trim give the real angle for the servo (0-180)
+    def to_hardware_angle(self, channel_idx, logical_angle):
         min_lim = self.min_limits[channel_idx]
         max_lim = self.max_limits[channel_idx]
-        angle = max(min_lim, min(max_lim, logical_angle))
+        angle = logical_angle
+        if angle > max_lim:
+            angle = max_lim
+        if angle < min_lim:
+            angle = min_lim
 
-        # Invert if required
         if self.inverted[channel_idx]:
             angle = 180 - angle
 
-        # Apply calibration trim
         angle += self.trims[channel_idx]
-        return max(0, min(180, int(angle)))
+        angle = int(angle)
+        if angle > 180:
+            angle = 180
+        if angle < 0:
+            angle = 0
+        return angle
 
-    def get_hardware_angles(self, logical_angles: List[int]) -> List[int]:
-        """Convert list of 6 logical angles to hardware angles."""
-        return [self.to_hardware_angle(i, a) for i, a in enumerate(logical_angles)]
+    def get_hardware_angles(self, logical_angles):
+        hw = []
+        for i in range(len(logical_angles)):
+            hw.append(self.to_hardware_angle(i, logical_angles[i]))
+        return hw
 
-    # =========================================================================
-    # Actuation Commands
-    # =========================================================================
+    #==========================================================================
+    # moving the servos
 
-    def send_angles(self, angles: List[int], force: bool = False) -> None:
-        """
-        Send all 6 servo angles to hardware immediately.
-        angles: List of 6 integers (0-180 degrees).
-        """
+    # sends all 6 angles (0-180) right away
+    def send_angles(self, angles, force=False):
         assert len(angles) == self.NUM_SERVOS, "Must supply exactly 6 servo angles"
         previous_angles = list(self.current_angles)
-        self.target_angles = [max(0, min(180, int(a))) for a in angles]
+        new_target = []
+        for a in angles:
+            new_target.append(clamp(int(a), 0, 180))
+        self.target_angles = new_target
         self.current_angles = list(self.target_angles)
 
         hw_angles = self.get_hardware_angles(self.current_angles)
 
         if self.transport == "ble" and not self.simulation_mode:
-            commands = [
-                f"{chr(ord('A') + i)}{angle}$"
-                for i, angle in enumerate(hw_angles)
-                if force or self.current_angles[i] != previous_angles[i]
-            ]
+            # only the servos that changed (or all of them with force)
+            commands = []
+            for i in range(len(hw_angles)):
+                if force or self.current_angles[i] != previous_angles[i]:
+                    letter = chr(ord("A") + i)
+                    commands.append(f"{letter}{hw_angles[i]}$")
             if not commands:
                 return
             self._queue_ble_commands(commands, "Hiwonder app servo angles")
@@ -537,16 +565,16 @@ class HandController:
             packet = self.build_uhand_packet(0x01, hw_angles)
             desc = f"FUNC_SET_SERVO: {hw_angles}"
         else:
-            # Lobot protocol: CMD_MULT_SERVO_MOVE = 0x03
-            # Pulse width 500-2500 us (500 + angle * 2000 // 180)
+            # lobot CMD_MULT_SERVO_MOVE = 0x03
+            # pulse is 500-2500 us (500 + angle * 2000 // 180)
             time_ms = 200
-            params = [
-                self.NUM_SERVOS,
-                time_ms & 0xFF, (time_ms >> 8) & 0xFF
-            ]
-            for idx, a in enumerate(hw_angles, start=1):
+            params = [self.NUM_SERVOS, time_ms & 0xFF, (time_ms >> 8) & 0xFF]
+            for idx in range(len(hw_angles)):
+                a = hw_angles[idx]
                 pulse = 500 + (a * 2000 // 180)
-                params.extend([idx, pulse & 0xFF, (pulse >> 8) & 0xFF])
+                params.append(idx + 1)
+                params.append(pulse & 0xFF)
+                params.append((pulse >> 8) & 0xFF)
             packet = self.build_lobot_packet(0x03, params)
             desc = f"CMD_MULT_SERVO_MOVE: {hw_angles}"
 
@@ -555,14 +583,15 @@ class HandController:
         if self.on_angles_updated:
             self.on_angles_updated(list(self.current_angles))
 
-    def set_servo_angle(self, servo_idx: int, angle: int) -> None:
-        """Set a single servo angle (0-indexed: 0=Thumb .. 5=Wrist)."""
-        if 0 <= servo_idx < self.NUM_SERVOS:
+    # one servo (0 = thumb .. 5 = wrist)
+    def set_servo_angle(self, servo_idx, angle):
+        if servo_idx >= 0 and servo_idx < self.NUM_SERVOS:
             if self.transport == "ble" and not self.simulation_mode:
-                self.current_angles[servo_idx] = max(0, min(180, int(angle)))
+                self.current_angles[servo_idx] = clamp(int(angle), 0, 180)
                 self.target_angles[servo_idx] = self.current_angles[servo_idx]
                 app_angle = self.to_hardware_angle(servo_idx, self.current_angles[servo_idx])
-                command = f"{chr(ord('A') + servo_idx)}{app_angle}$"
+                letter = chr(ord("A") + servo_idx)
+                command = f"{letter}{app_angle}$"
                 self._queue_ble_commands([command], f"{self.SERVO_NAMES[servo_idx]} angle")
                 if self.on_angles_updated:
                     self.on_angles_updated(list(self.current_angles))
@@ -571,14 +600,16 @@ class HandController:
             angles[servo_idx] = angle
             self.send_angles(angles)
 
-    def set_buzzer(self, freq_hz: int = 1000, duration_ms: int = 200) -> None:
-        """Trigger onboard buzzer with frequency and duration."""
+    def _buzzer_off(self):
+        self._queue_ble_commands(["Z0$"], "Hiwonder buzzer off")
+
+    def set_buzzer(self, freq_hz=1000, duration_ms=200):
         self.last_buzzer = (freq_hz, duration_ms)
         if self.transport == "ble" and not self.simulation_mode:
-            # The official firmware exposes a fixed app tone via Z1/Z0, not arbitrary frequency.
+            # the firmware only has one fixed tone over Z1/Z0, no frequency
             self._queue_ble_commands(["Z1$"], "Hiwonder buzzer on")
             if duration_ms > 0:
-                timer = threading.Timer(duration_ms / 1000.0, lambda: self._queue_ble_commands(["Z0$"], "Hiwonder buzzer off"))
+                timer = threading.Timer(duration_ms / 1000.0, self._buzzer_off)
                 timer.daemon = True
                 timer.start()
             return
@@ -593,11 +624,11 @@ class HandController:
         else:
             self.log("SYS", f"Buzzer simulated ({freq_hz}Hz, {duration_ms}ms)")
 
-    def set_rgb(self, r: int, g: int, b: int) -> None:
-        """Set onboard RGB LED color (0-255 each)."""
-        r = max(0, min(255, int(r)))
-        g = max(0, min(255, int(g)))
-        b = max(0, min(255, int(b)))
+    # rgb led colour (0-255 each)
+    def set_rgb(self, r, g, b):
+        r = clamp(int(r), 0, 255)
+        g = clamp(int(g), 0, 255)
+        b = clamp(int(b), 0, 255)
         self.rgb_color = (r, g, b)
 
         if self.transport == "ble" and not self.simulation_mode:
@@ -610,8 +641,8 @@ class HandController:
         else:
             self.log("SYS", f"RGB simulated: R={r} G={g} B={b}")
 
-    def query_angles(self) -> None:
-        """Request current hardware servo angles from uHand UNO."""
+    # asks the hand for its servo angles
+    def query_angles(self):
         if self.transport == "ble" and not self.simulation_mode:
             self.log("WARN", "The Hiwonder BLE app protocol does not provide angle feedback; BLE angle queries are unavailable.")
             return
@@ -622,73 +653,70 @@ class HandController:
         else:
             self.log("SYS", "Query not supported by active protocol")
 
-    # =========================================================================
-    # Smooth Motion Interpolation
-    # =========================================================================
+    #==========================================================================
+    # smooth movement
 
-    def move_smooth(
-        self,
-        target_angles: List[int],
-        duration_ms: int = 500,
-        steps: int = 20
-    ) -> None:
-        """
-        Interpolate smoothly from current angles to target angles.
-        Blocks the calling thread (or runs inside sequence worker).
-        """
+    # goes from the current angles to target_angles in small steps
+    # this blocks so call it from a thread (the sequence player does)
+    def move_smooth(self, target_angles, duration_ms=500, steps=20):
         start_angles = list(self.current_angles)
-        target_angles = [max(0, min(180, int(a))) for a in target_angles]
-        step_delay = (duration_ms / 1000.0) / max(1, steps)
+        targets = []
+        for a in target_angles:
+            targets.append(clamp(int(a), 0, 180))
+        n_steps = steps
+        if n_steps < 1:
+            n_steps = 1
+        step_delay = (duration_ms / 1000.0) / n_steps
 
         for step in range(1, steps + 1):
             if self._seq_stop_event.is_set():
                 break
             alpha = step / float(steps)
-            # Smooth step curve (cosine easing)
+            # cosine easing so it starts and stops slow
             ease = 0.5 * (1.0 - math.cos(alpha * math.pi))
-            interp = [
-                int(round(start + (target - start) * ease))
-                for start, target in zip(start_angles, target_angles)
-            ]
+            interp = []
+            for i in range(min(len(start_angles), len(targets))):
+                start = start_angles[i]
+                interp.append(int(round(start + (targets[i] - start) * ease)))
             self.send_angles(interp)
             time.sleep(step_delay)
 
-    # =========================================================================
-    # Sequence Player Engine
-    # =========================================================================
+    #==========================================================================
+    # sequence player
 
-    def play_sequence(
-        self,
-        keyframes: List[Tuple[Tuple[int, int, int, int, int, int], int]],
-        loop: bool = False,
-        speed_factor: float = 1.0,
-        on_complete: Optional[Callable[[], None]] = None
-    ) -> None:
-        """
-        Play a list of keyframes asynchronously in background.
-        Each keyframe: ((s1, s2, s3, s4, s5, s6), duration_ms)
-        """
+    # plays the keyframes on a background thread
+    # each keyframe is ((s1, s2, s3, s4, s5, s6), duration_ms)
+    def play_sequence(self, keyframes, loop=False, speed_factor=1.0, on_complete=None):
         self.stop_sequence()
         self._seq_stop_event.clear()
         self._seq_pause_event.set()
         self.is_playing_sequence = True
 
-        def _worker():
+        def worker():
             try:
                 iteration = 0
                 while not self._seq_stop_event.is_set():
                     total_frames = len(keyframes)
-                    for idx, (pose, dur_ms) in enumerate(keyframes):
+                    for idx in range(total_frames):
+                        pose = keyframes[idx][0]
+                        dur_ms = keyframes[idx][1]
                         if self._seq_stop_event.is_set():
                             break
                         self._seq_pause_event.wait()
 
-                        scaled_dur = max(50, int(dur_ms / max(0.1, speed_factor)))
+                        speed = speed_factor
+                        if speed < 0.1:
+                            speed = 0.1
+                        scaled_dur = int(dur_ms / speed)
+                        if scaled_dur < 50:
+                            scaled_dur = 50
                         if self.on_sequence_step:
                             self.on_sequence_step(idx + 1, total_frames)
 
-                        # Smoothly move to keyframe
-                        steps = max(5, int(scaled_dur / 25))
+                        # move smooth to the keyframe
+                        steps = int(scaled_dur / 25)
+                        if steps < 5:
+                            steps = 5
                         self.move_smooth(list(pose), duration_ms=scaled_dur, steps=steps)
 
                     iteration += 1
@@ -702,31 +730,27 @@ class HandController:
                     except Exception:
                         pass
 
-        self._seq_thread = threading.Thread(target=_worker, daemon=True)
+        self._seq_thread = threading.Thread(target=worker, daemon=True)
         self._seq_thread.start()
 
-    def pause_sequence(self) -> None:
-        """Pause currently running sequence."""
+    def pause_sequence(self):
         self._seq_pause_event.clear()
 
-    def resume_sequence(self) -> None:
-        """Resume paused sequence."""
+    def resume_sequence(self):
         self._seq_pause_event.set()
 
-    def stop_sequence(self) -> None:
-        """Stop any playing sequence."""
+    def stop_sequence(self):
         self._seq_stop_event.set()
         self._seq_pause_event.set()
         if self._seq_thread and self._seq_thread.is_alive():
             self._seq_thread.join(timeout=1.0)
         self.is_playing_sequence = False
 
-    # =========================================================================
-    # Raw Packet Transmission & Reception
-    # =========================================================================
+    #==========================================================================
+    # sending and reciving raw packets
 
-    def send_raw_hex(self, hex_str: str) -> bool:
-        """Send raw hex string (e.g. 'AA 77 01 06 5A 5A 5A 5A 5A 5A DC')."""
+    # sends a hex string like 'AA 77 01 06 5A 5A 5A 5A 5A 5A DC'
+    def send_raw_hex(self, hex_str):
         if self.transport == "ble" and not self.simulation_mode:
             self.log("ERR", "Raw AA 77 hex packets are for serial UART. BLE uses Hiwonder ASCII commands such as A90$.")
             return False
@@ -739,15 +763,13 @@ class HandController:
             self.log("ERR", f"Invalid hex string: {e}")
             return False
 
-    def _send_raw(self, packet: bytes, description: str = "") -> None:
-        """Send byte array over serial link."""
+    def _send_raw(self, packet, description=""):
         hex_dump = packet.hex(" ").upper()
         self.log("TX", f"{hex_dump}  ({description})")
 
         if self.simulation_mode:
-            # Handle simulated responses if this was a query
+            # fake answer if it was a angle query
             if len(packet) >= 4 and packet[0] == 0xAA and packet[1] == 0x77 and packet[2] == 0x11:
-                # Simulate response
                 resp_data = bytes(self.current_angles)
                 resp_pkt = self.build_uhand_packet(0x11, resp_data)
                 self.log("RX", f"{resp_pkt.hex(' ').upper()}  (SIMULATED FEEDBACK)")
@@ -763,8 +785,8 @@ class HandController:
         else:
             self.log("ERR", "Packet not sent: connect the selected hardware transport or enable simulation explicitly.")
 
-    def _rx_worker(self) -> None:
-        """Background thread listening for incoming serial data frames."""
+    # background thread that reads the serial port and finds the packets
+    def _rx_worker(self):
         buffer = bytearray()
         while self._running and self.ser and self.ser.is_open:
             try:
@@ -773,12 +795,13 @@ class HandController:
                     chunk = self.ser.read(waiting)
                     buffer.extend(chunk)
 
-                    # Parse packets: looking for 0xAA 0x77
+                    # look for 0xAA 0x77 (uHand) or 0x55 0x55 (lobot)
                     while len(buffer) >= 4:
                         if buffer[0] == 0xAA and buffer[1] == 0x77:
                             func = buffer[2]
                             data_len = buffer[3]
-                            total_len = 4 + data_len + 1  # header(2) + func + len + data + check
+                            # header(2) + func + len + data + check
+                            total_len = 4 + data_len + 1
                             if len(buffer) >= total_len:
                                 packet = bytes(buffer[:total_len])
                                 buffer = buffer[total_len:]
@@ -795,7 +818,7 @@ class HandController:
                             else:
                                 break
                         else:
-                            # Drop invalid leading byte
+                            # not a header, drop the first byte
                             buffer.pop(0)
                 else:
                     time.sleep(0.02)
@@ -804,19 +827,21 @@ class HandController:
                     self.log("ERR", f"RX error: {e}")
                 break
 
-    def _handle_incoming_packet(self, packet: bytes, func: int, data_len: int) -> None:
-        """Process incoming verified uHand UNO packet."""
+    def _handle_incoming_packet(self, packet, func, data_len):
         data = packet[4:4 + data_len]
         check = packet[-1]
         expected_check = self.calc_uhand_checksum(func, data_len, data)
-        valid = (check == expected_check)
+        valid = check == expected_check
 
         hex_dump = packet.hex(" ").upper()
-        status = "OK" if valid else f"CHECKSUM_MISMATCH (exp: {expected_check:02X})"
+        if valid:
+            status = "OK"
+        else:
+            status = f"CHECKSUM_MISMATCH (exp: {expected_check:02X})"
         self.log("RX", f"{hex_dump}  (func=0x{func:02X}, len={data_len}, {status})")
 
         if valid and func == 0x11 and data_len == self.NUM_SERVOS:
-            # Angle feedback
+            # the angles from the hand
             reported_angles = list(data)
             self._hardware_response.set()
             self.log("SYS", f"Received hardware angles: {reported_angles}")
@@ -824,17 +849,14 @@ class HandController:
             if self.on_angles_updated:
                 self.on_angles_updated(list(self.current_angles))
 
-    def _handle_incoming_lobot(self, packet: bytes) -> None:
-        """Process incoming Lobot packet."""
+    def _handle_incoming_lobot(self, packet):
         hex_dump = packet.hex(" ").upper()
         self.log("RX", f"{hex_dump}  (LOBOT PACKET)")
 
-    # =========================================================================
-    # Configuration Persistence
-    # =========================================================================
+    #==========================================================================
+    # saving the calibration
 
-    def save_calibration(self, filepath: str) -> None:
-        """Save trims, inversions, and limits to a JSON file."""
+    def save_calibration(self, filepath):
         data = {
             "trims": self.trims,
             "inverted": self.inverted,
@@ -845,8 +867,7 @@ class HandController:
             json.dump(data, f, indent=2)
         self.log("SYS", f"Saved calibration to {filepath}")
 
-    def load_calibration(self, filepath: str) -> bool:
-        """Load trims, inversions, and limits from a JSON file."""
+    def load_calibration(self, filepath):
         if not os.path.exists(filepath):
             return False
         try:
@@ -861,3 +882,12 @@ class HandController:
         except Exception as e:
             self.log("ERR", f"Failed loading calibration: {e}")
             return False
+
+
+# keeps x between lo and hi
+def clamp(x, lo, hi):
+    if x > hi:
+        return hi
+    if x < lo:
+        return lo
+    return x

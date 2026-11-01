@@ -1,9 +1,9 @@
-"""
-Run the EEG Bridge on its own:  python -m eeg [--sim]
+#   HANDMOVE - EEG Bridge (run on its own)
+#        Oumar Ibrahim U22200741
 
-Without --sim it connects to the hand with the saved settings (same as the
-GUI). With --sim the hand is simulated, which is handy for trying the decoder.
-"""
+# run just the eeg bridge:  python -m eeg [--sim]
+# without --sim it connects to the hand with the saved settings (same as the gui)
+# with --sim the hand is simulated, good for trying the decoder
 
 import argparse
 import os
@@ -16,18 +16,35 @@ from controller import HandController  # noqa: E402
 from eeg.panel import EEGPanel  # noqa: E402
 
 
-def main() -> None:
+def main():
     ap = argparse.ArgumentParser(description="HANDMOVE EEG Bridge")
     ap.add_argument("--sim", action="store_true", help="simulate the hand instead of connecting to it")
     args = ap.parse_args()
-    ctrl = HandController(simulation_mode=args.sim, transport="serial" if args.sim else None)
+    if args.sim:
+        ctrl = HandController(simulation_mode=args.sim, transport="serial")
+    else:
+        ctrl = HandController(simulation_mode=args.sim, transport=None)
     if not args.sim:
         ok, msg = ctrl.connect()
-        print(("Connected: " if ok else "Hand not connected: ") + msg)
-    ctrl.on_log = lambda d, t: print(f"[{d}] {t}") if d in ("ERR", "SYS") else None
+        if ok:
+            print("Connected: " + msg)
+        else:
+            print("Hand not connected: " + msg)
+
+    # only print errors and system messages
+    def print_log(d, t):
+        if d == "ERR" or d == "SYS":
+            print(f"[{d}] {t}")
+
+    ctrl.on_log = print_log
     root = tk.Tk()
     root.withdraw()
-    EEGPanel(root, controller=ctrl, title="HANDMOVE EEG Bridge", on_close=lambda: (ctrl.disconnect(), root.destroy()))
+
+    def close_all():
+        ctrl.disconnect()
+        root.destroy()
+
+    EEGPanel(root, controller=ctrl, title="HANDMOVE EEG Bridge", on_close=close_all)
     root.mainloop()
 
 

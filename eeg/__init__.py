@@ -1,4 +1,4 @@
-"""EEG -> HANDMOVE bridge: device-agnostic sources, decoding, and hand mapping."""
+# eeg -> HANDMOVE bridge: sources, decoding and mapping to the hand
 from .sources import (BrainFlowSource, Chunk, EEGSource, FINGER_LABELS, LSLSource, ReplaySource,
                       SourceInfo, SyntheticSource, load_kaya_mat, load_recording, save_recording)
 from .decoder import FingerDecoder, Preprocessor, train_from_recording

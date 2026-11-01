@@ -12,3 +12,7 @@ dist/
 
 # Local datasets (multi-GB, never commit)
 data/
+
+# Local update staging and backups
+backup_before_humanize/
+handmovement/

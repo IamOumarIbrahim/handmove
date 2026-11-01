@@ -1,6 +1,7 @@
-"""
-Tests for the uHand UNO 3D model geometry and kinematics (no OpenGL needed).
-"""
+#   HANDMOVE - 3D hand model tests
+#        Oumar Ibrahim U22200741
+
+# tests for the uHand 3D model shapes and kinematics (no opengl needed)
 
 import os
 import sys
@@ -26,7 +27,7 @@ class TestHandKinematics(unittest.TestCase):
             self.assertGreater(tips[name][2], knuckle_z + 60, name)
 
     def test_hand_length_matches_spec(self):
-        # Hiwonder lists the hand as 165 mm long (wrist to middle fingertip).
+        # hiwonder says the hand is 165 mm long (wrist to middle finger tip)
         tips = K.fingertip_positions(OPEN)
         length = tips["middle"][2] - (K.WRIST_Z + K.HAND_BASE_Z)
         self.assertAlmostEqual(length, 165.0, delta=10.0)

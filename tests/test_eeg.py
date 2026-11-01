@@ -1,7 +1,8 @@
-"""
-Tests for the EEG bridge (eeg/ package). No hardware or downloads needed.
-Run: python -m unittest discover tests
-"""
+#   HANDMOVE - EEG Bridge tests
+#        Oumar Ibrahim U22200741
+
+# tests for the eeg package, no hardware or downloads needed
+# run: python -m unittest discover tests
 
 import json
 import os
@@ -22,12 +23,19 @@ from eeg.decoder import make_windows
 from eeg.mapper import DEFAULT_POSES
 
 
+# records some fake eeg, returns data, labels and the source info
 def record_synthetic(seed, blocks=300, n_channels=8):
     src = SyntheticSource(n_channels=n_channels, realtime=False, block=250, seed=seed)
     src.start()
-    chunks = [src.read() for _ in range(blocks)]
-    return (np.concatenate([c.data for c in chunks], axis=1),
-            np.concatenate([c.labels for c in chunks]), src.info)
+    all_data = []
+    all_labels = []
+    for b in range(blocks):
+        c = src.read()
+        all_data.append(c.data)
+        all_labels.append(c.labels)
+    data = np.concatenate(all_data, axis=1)
+    labels = np.concatenate(all_labels)
+    return data, labels, src.info
 
 
 class TestDecoder(unittest.TestCase):
@@ -39,8 +47,10 @@ class TestDecoder(unittest.TestCase):
             d2, l2, _ = record_synthetic(7, 150, n_channels=n_ch)
             X, y, _ = make_windows(dec.make_preprocessor().process(d2), l2, info.fs)
             keep = np.isin(y, dec.classes)
-            pred = np.array(dec.classes)[dec.predict_proba_batch(X[keep]).argmax(axis=1)]
-            self.assertGreater((pred == y[keep]).mean(), 0.8)
+            probs = dec.predict_proba_batch(X[keep])
+            pred = np.array(dec.classes)[probs.argmax(axis=1)]
+            right = (pred == y[keep]).mean()
+            self.assertGreater(right, 0.8)
 
     def test_save_load_roundtrip(self):
         d, l, info = record_synthetic(2, 120)
@@ -56,10 +66,10 @@ class TestDecoder(unittest.TestCase):
 class TestMapper(unittest.TestCase):
     def test_commits_only_after_threshold_and_dwell(self):
         m = IntentMapper([0, 2], threshold=0.6, smoothing=1.0, dwell_s=0.3, max_speed_dps=1e6, send_hz=1e6)
-        self.assertIsNone(m.update([0.45, 0.55], now=0.0))   # below threshold: hold
-        m.update([0.1, 0.9], now=0.1)                          # candidate
+        self.assertIsNone(m.update([0.45, 0.55], now=0.0))   # under threshold so it holds
+        m.update([0.1, 0.9], now=0.1)                          # candiate
         self.assertIsNone(m.committed)
-        out = m.update([0.1, 0.9], now=0.5)                    # dwell elapsed
+        out = m.update([0.1, 0.9], now=0.5)                    # dwell time is over
         self.assertEqual(m.committed, 2)
         self.assertEqual(out, list(DEFAULT_POSES[2]))
 
@@ -67,7 +77,7 @@ class TestMapper(unittest.TestCase):
         m = IntentMapper([0, 1], smoothing=1.0, dwell_s=0.0, max_speed_dps=100, send_hz=1e6)
         m.update([0.0, 1.0], now=0.0)
         out = m.update([0.0, 1.0], now=0.5)
-        self.assertEqual(out[0], 130)  # thumb 180 -> 0 at 100 deg/s for 0.5 s
+        self.assertEqual(out[0], 130)  # thumb goes 180 -> 0 at 100 deg/s for 0.5 s
 
 
 class TestReplay(unittest.TestCase):

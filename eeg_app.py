@@ -1,33 +1,33 @@
-"""
-Launch the HANDMOVE GUI together with the EEG Bridge panel.
+#   HANDMOVE - GUI with the EEG panel
+#        Oumar Ibrahim U22200741
 
-    python main.py --gui --eeg
-
-The EEG panel is a separate window that drives the GUI's own HandController,
-so sliders and the hand view follow whatever the EEG decoder commands.
-gui_legacy.py is used as-is.
-"""
+# starts the HANDMOVE gui together with the EEG Bridge panel
+#     python main.py --gui --eeg
+# the eeg panel is a second window that uses the gui's own HandController
+# so the sliders and the hand view follow what the decoder sends
+# gui_legacy.py is used as it is
 
 import tkinter as tk
-from typing import Optional
 
 import gui_legacy
 from connection_settings import load_connection_settings
 from eeg.panel import EEGPanel
 
 
-def launch_gui_with_eeg(port: Optional[str] = None, baud: Optional[int] = None,
-                        transport: Optional[str] = None) -> None:
+def launch_gui_with_eeg(port=None, baud=None, transport=None):
     root = tk.Tk()
     defaults = load_connection_settings()
-    app = gui_legacy.LegacyHandGUI(
-        root,
-        default_port=defaults["port"] if port is None else port,
-        default_baud=defaults["baudrate"] if baud is None else baud,
-    )
-    if transport in ("ble", "serial"):
+    if port is None:
+        port = defaults["port"]
+    if baud is None:
+        baud = defaults["baudrate"]
+    app = gui_legacy.LegacyHandGUI(root, default_port=port, default_baud=baud)
+    if transport == "ble" or transport == "serial":
         app.ctrl.transport = transport
-        app.transport_var.set("Bluetooth LE" if transport == "ble" else "Serial UART")
+        if transport == "ble":
+            app.transport_var.set("Bluetooth LE")
+        else:
+            app.transport_var.set("Serial UART")
         app._on_transport_changed()
 
     panel = {"p": None}
@@ -38,13 +38,13 @@ def launch_gui_with_eeg(port: Optional[str] = None, baud: Optional[int] = None,
             return
         panel["p"] = EEGPanel(root, controller=app.ctrl)
 
-    # Add an "EEG" menu to the existing menu bar without editing gui_legacy.py
+    # add a "EEG" menu to the menu bar without changing gui_legacy.py
     menubar = root.nametowidget(root["menu"])
     eeg_menu = tk.Menu(menubar, tearoff=0)
     eeg_menu.add_command(label="Open EEG Bridge...", command=open_panel)
     menubar.add_cascade(label="EEG", menu=eeg_menu)
 
-    # E-STOP in the main window also stops EEG control before going neutral.
+    # E-STOP in the main window stops the eeg control too before going neutral
     def estop():
         p = panel["p"]
         if p is not None and p.win.winfo_exists():
